@@ -10,7 +10,7 @@ This register must be refreshed when either lock changes.
 | base64 | HTTP Basic authentication | runtime | MIT OR Apache-2.0 |
 | clap | CLI parsing | runtime | MIT OR Apache-2.0 |
 | futures | bounded concurrent observation | runtime | MIT OR Apache-2.0 |
-| jiff | timestamps and IANA time zones | runtime | Unlicense OR MIT |
+| jiff | timestamps and bundled IANA time zones | runtime | Unlicense OR MIT |
 | reqwest | bounded rustls HTTP client | runtime | MIT OR Apache-2.0 |
 | rusqlite | transactional SQLite state | runtime | MIT |
 | schemars | versioned JSON Schema generation | build/runtime CLI | MIT |
@@ -31,3 +31,7 @@ transitive notice report remains required before public release.
 `webpki-roots`, reached through reqwest/rustls, includes Mozilla's public root
 certificate data under CDLA-Permissive-2.0. This is accepted for runtime TLS
 verification and does not contain application code or private trust material.
+
+Jiff's IANA database is embedded so named-zone behavior is hermetic in Nix build
+sandboxes and systemd services. Dependency updates must review the bundled tzdb
+release as well as the Jiff code version.

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use jiff::Timestamp;
-use jiff::tz::TimeZone;
+use jiff::tz::TimeZoneDatabase;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -23,7 +23,8 @@ pub struct AggregateEvaluation {
 }
 
 pub fn local_time_bucket(timestamp: Timestamp, time_zone: &str) -> Result<(u8, i32), String> {
-    let time_zone = TimeZone::get(time_zone).map_err(|error| error.to_string())?;
+    let database = TimeZoneDatabase::bundled();
+    let time_zone = database.get(time_zone).map_err(|error| error.to_string())?;
     let zoned = timestamp.to_zoned(time_zone);
     let hour = u8::try_from(zoned.hour()).map_err(|_| "local hour is out of range".to_owned())?;
     Ok((hour, zoned.offset().seconds() / 60))
@@ -901,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn europe_amsterdam_dst_hours_match_wall_hour_contract() {
+    fn bundled_timezone_database_handles_amsterdam_dst_hours() {
         let first_repeated: Timestamp = "2026-10-25T00:30:00Z".parse().expect("timestamp");
         let second_repeated: Timestamp = "2026-10-25T01:30:00Z".parse().expect("timestamp");
         assert_eq!(
