@@ -1,6 +1,7 @@
 /target/
 /.direnv/
 /.env.local
+/local_docs/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
