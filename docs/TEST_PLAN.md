@@ -1,6 +1,6 @@
 # Test plan
 
-`just test` is authoritative. The suite is 55 deterministic tests and contacts no
+`just test` is authoritative. The suite is 67 deterministic tests and contacts no
 live AdGuard Home or Pushover service.
 
 Rows are marked *thin* where a representative test exists but not the full case
@@ -52,20 +52,53 @@ matrix, and *absent* where no test exists yet.
   after an interrupted transaction, live and dry-run state binding, retention at
   the inclusive cutoff, and notification backoff before delivery.
 - Injected time covers both Amsterdam DST edges.
-- Learning-boundary and clock-regression time injection. *absent*
+- A regressed wall clock fails before the run is recorded, leaving the earlier
+  run as the only persisted one.
+- Learning-boundary time injection. *absent*
 - Authentication cooldown persistence and expiry. *absent*
 - Notification batching order and the rule that a behavior group advances only
   when every member is complete. *absent*
 
 ## CLI
 
-- A dry run never loads notification credentials.
+Exit codes are the systemd and job-health contract, so each one is exercised
+end to end through `check` with an injected clock and a mock AdGuard server.
+
+| Code | Covered by |
+| --- | --- |
+| `0` | A healthy run with no findings and no transitions |
+| `1` | An active warning with `--fail-on warning`, and *not* with `--fail-on error` |
+| `2` | An unparseable configuration, a zero or oversized report limit, `--format json` with more than one report, and an invalid `--since` |
+| `3` | An unreachable target leaving zero complete targets |
+| `4` | A retryable Pushover response, and an ambiguous one |
+| `5` | A regressed wall clock, and an absent state database |
+
+Every documented code also has a distinct reason string.
+
+- A dry run never loads notification credentials, and its run is recorded in
+  dry-run mode.
 - Pushover classification for confirmed success and for retryable versus
-  permanent HTTP failures.
-- End-to-end coverage of every documented exit code. *absent*
-- Report JSON validated against the checked-in run-report schema. *absent*
-- Golden JSON and JSONL report output. *absent*
+  permanent HTTP failures, at the unit level and through a mock endpoint.
+- A confirmed delivery records the remote request identifier.
+- An ambiguous delivery is recorded as unknown and is never resent on a later
+  run, because the outbox only re-selects pending and retryable rows.
+- A persisted report carries every property the checked-in run-report schema
+  requires, declares no property the schema does not, pins both schema versions
+  to `1`, and round-trips back through `RunReport`. Because the schema is
+  generated from those types and `just schema-check` proves it has not drifted,
+  and because every report type denies unknown fields, a round trip is
+  equivalent to validation without adding a JSON Schema validator dependency.
+- Golden byte-for-byte JSON and JSONL output. *absent*
 - Migration tests per released schema version. *absent*; v1 has no predecessor.
+
+## Notification transport
+
+`PushoverClient::from_config` is the only constructor reachable outside tests and
+always uses the fixed production endpoint. A `#[cfg(test)]` constructor accepts
+an endpoint so delivery can be exercised against a mock server; it does not
+exist in a release build. `check_with_sink` accepts an already-built client for
+the same reason, and the production path passes `None`, which preserves the rule
+that credentials are read only when a message is actually pending.
 
 ## Fixtures
 

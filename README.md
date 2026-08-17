@@ -24,7 +24,9 @@ nix flake check
 nix develop -c just check
 ```
 
-No live AdGuard Home or Pushover service is contacted by the test suite.
+No live AdGuard Home or Pushover service is contacted by the test suite. The
+`supply-chain` step refreshes the RustSec advisory database, so `just check`
+needs network access; every other step is offline.
 
 ## CLI
 
@@ -44,5 +46,6 @@ keeps ordinary findings separate from execution health.
 
 Licensed under either [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at
 your option. Third-party dependency licenses are registered in
-[`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) and enforced by
-`cargo deny check licenses`.
+[`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) and enforced by `just
+supply-chain`, which also checks RustSec advisories, banned crates, and
+permitted sources.

@@ -165,6 +165,17 @@ async fn check(
     fail_on: FailOn,
     clock: &dyn Clock,
 ) -> Result<u8, CommandError> {
+    check_with_sink(config_path, dry_run, format, fail_on, clock, None).await
+}
+
+async fn check_with_sink(
+    config_path: &Path,
+    dry_run: bool,
+    format: OutputFormat,
+    fail_on: FailOn,
+    clock: &dyn Clock,
+    sink: Option<PushoverClient>,
+) -> Result<u8, CommandError> {
     let config = Config::load(config_path, false).map_err(CommandError::invocation)?;
     let passwords = read_target_passwords(&config).map_err(CommandError::invocation)?;
     let started = clock.now();
@@ -385,8 +396,10 @@ async fn check(
             .pending_outbox(&clock.now().to_string())
             .map_err(CommandError::state)?;
         if !pending.is_empty() {
-            let pushover =
-                PushoverClient::from_config(&config).map_err(CommandError::invocation)?;
+            let pushover = match sink {
+                Some(sink) => sink,
+                None => PushoverClient::from_config(&config).map_err(CommandError::invocation)?,
+            };
             for message in pending {
                 let attempt_started = clock.now().to_string();
                 let outcome = pushover.send(&message).await;
@@ -712,50 +725,70 @@ fn exit_reason(code: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
-    use httpmock::Method::GET;
-    use httpmock::MockServer;
+    use httpmock::Method::{GET, POST};
+    use httpmock::{Mock, MockServer};
     use jiff::Timestamp;
-    use sentinel_core::FixedClock;
+    use sentinel_core::{Config, FixedClock, NotificationStatus, RunReport, RunStatus};
     use sentinel_store::StateStore;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
-    use super::{FailOn, OutputFormat, check};
+    use super::{
+        CommandError, FailOn, OutputFormat, PushoverClient, SchemaKind, check, check_with_sink,
+        print_schema, report,
+    };
 
-    #[tokio::test]
-    async fn dry_run_never_loads_missing_pushover_credentials() {
-        let server = MockServer::start_async().await;
-        let fixtures = [
-            (
-                "/control/status",
-                include_str!("../../../testdata/api/status.json"),
-            ),
-            (
-                "/control/stats",
-                include_str!("../../../testdata/api/stats.json"),
-            ),
-            (
-                "/control/dns_info",
-                include_str!("../../../testdata/api/dns-info.json"),
-            ),
-            (
-                "/control/filtering/status",
-                include_str!("../../../testdata/api/filtering-status.json"),
-            ),
-            (
-                "/control/rewrite/list",
-                include_str!("../../../testdata/api/rewrite-list.json"),
-            ),
-            (
-                "/control/rewrite/settings",
-                include_str!("../../../testdata/api/rewrite-settings.json"),
-            ),
-        ];
-        let mut mocks = Vec::new();
-        for (path, body) in fixtures {
+    const REFERENCE_INSTANT: &str = "2027-01-15T08:00:00Z";
+    const DECLARED_MODE: &str = "load_balance";
+    const DRIFTED_MODE: &str = "parallel";
+
+    const GOLDEN: [(&str, &str); 6] = [
+        (
+            "/control/status",
+            include_str!("../../../testdata/api/status.json"),
+        ),
+        (
+            "/control/stats",
+            include_str!("../../../testdata/api/stats.json"),
+        ),
+        (
+            "/control/dns_info",
+            include_str!("../../../testdata/api/dns-info.json"),
+        ),
+        (
+            "/control/filtering/status",
+            include_str!("../../../testdata/api/filtering-status.json"),
+        ),
+        (
+            "/control/rewrite/list",
+            include_str!("../../../testdata/api/rewrite-list.json"),
+        ),
+        (
+            "/control/rewrite/settings",
+            include_str!("../../../testdata/api/rewrite-settings.json"),
+        ),
+    ];
+
+    #[derive(Clone, Copy)]
+    enum Notifications {
+        Disabled,
+        Pushover,
+        PushoverWithAbsentSecrets,
+    }
+
+    struct Harness {
+        _directory: TempDir,
+        config_path: PathBuf,
+        state: PathBuf,
+    }
+
+    async fn serve_golden(server: &MockServer) -> Vec<Mock<'_>> {
+        let mut mocks = Vec::with_capacity(GOLDEN.len());
+        for (path, body) in GOLDEN {
             mocks.push(
                 server
-                    .mock_async(|when, then| {
+                    .mock_async(move |when, then| {
                         when.method(GET).path(path);
                         then.status(200)
                             .header("content-type", "application/json")
@@ -764,9 +797,30 @@ mod tests {
                     .await,
             );
         }
+        mocks
+    }
+
+    fn harness(
+        base_url: &str,
+        upstream_mode: &str,
+        drift_sustain: u32,
+        notifications: Notifications,
+    ) -> Harness {
         let directory = tempdir().expect("tempdir");
         let password = directory.path().join("password");
         fs::write(&password, "synthetic\n").expect("password");
+        let token = directory.path().join("pushover-token");
+        let user = directory.path().join("pushover-user");
+        fs::write(&token, "synthetic-token\n").expect("token");
+        fs::write(&user, "synthetic-user\n").expect("user");
+        let notifications = match notifications {
+            Notifications::Disabled => "[notifications]\nprovider = \"disabled\"".to_owned(),
+            Notifications::Pushover => pushover_block(&token, &user),
+            Notifications::PushoverWithAbsentSecrets => pushover_block(
+                &PathBuf::from("/missing/application-token"),
+                &PathBuf::from("/missing/user-key"),
+            ),
+        };
         let state = directory.path().join("state.sqlite");
         let config_path = directory.path().join("config.toml");
         fs::write(
@@ -774,7 +828,7 @@ mod tests {
             format!(
                 r#"schema_version = 1
 [state]
-path = "{}"
+path = "{state}"
 retention_days = 21
 [observation]
 request_timeout_ms = 5000
@@ -791,27 +845,27 @@ learning_days = 7
 minimum_same_hour_samples = 36
 [condition_profiles.current]
 authentication_rejected_sustain_runs = 1
-api_unavailable_sustain_runs = 4
+api_unavailable_sustain_runs = 1
 invalid_response_sustain_runs = 1
 unsupported_version_sustain_runs = 1
 protection_disabled_sustain_runs = 2
 processing_latency_sustain_runs = 4
 upstream_latency_sustain_runs = 4
-policy_drift_sustain_runs = 4
+policy_drift_sustain_runs = {drift_sustain}
 behavioral_anomaly_sustain_runs = 4
 recovery_runs = 1
 authentication_retry_seconds = 900
 processing_latency_ms = 500
 upstream_latency_ms = 750
-[notifications]
-provider = "pushover"
-[notifications.pushover]
-application_token_file = "/missing/application-token"
-user_key_file = "/missing/user-key"
+{notifications}
 [policies.test]
 protection_enabled = true
-upstream_mode = "load_balance"
-upstream_dns = ["tls://resolver.invalid"]
+upstream_mode = "{upstream_mode}"
+upstream_dns = [
+  "quic://dns10.quad9.net",
+  "tls://unfiltered.adguard-dns.com",
+  "https://cloudflare-dns.com/dns-query",
+]
 filters = []
 [policies.test.rewrites]
 enabled = true
@@ -819,46 +873,421 @@ required = []
 [[targets]]
 id = "resolver-a"
 name = "Resolver A"
-base_url = "{}"
+base_url = "{base_url}"
 username = "admin"
-password_file = "{}"
+password_file = "{password}"
 policy = "test"
 condition_profile = "current"
 allow_insecure_local_http = false
 "#,
-                state.display(),
-                server.base_url(),
-                password.display(),
+                state = state.display(),
+                password = password.display(),
             ),
         )
         .expect("config");
-        let timestamp: Timestamp = "2026-08-17T12:00:00Z".parse().expect("timestamp");
-        let code = check(
+        Harness {
+            _directory: directory,
+            config_path,
+            state,
+        }
+    }
+
+    fn pushover_block(token: &std::path::Path, user: &std::path::Path) -> String {
+        format!(
+            "[notifications]\nprovider = \"pushover\"\n[notifications.pushover]\napplication_token_file = \"{}\"\nuser_key_file = \"{}\"",
+            token.display(),
+            user.display()
+        )
+    }
+
+    fn at(instant: &str) -> FixedClock {
+        FixedClock::new(instant.parse::<Timestamp>().expect("timestamp"))
+    }
+
+    async fn run(harness: &Harness, fail_on: FailOn) -> Result<u8, CommandError> {
+        check(
+            &harness.config_path,
+            false,
+            OutputFormat::Json,
+            fail_on,
+            &at(REFERENCE_INSTANT),
+        )
+        .await
+    }
+
+    async fn run_notifying(
+        harness: &Harness,
+        pushover: &MockServer,
+        instant: &str,
+    ) -> Result<u8, CommandError> {
+        let config = Config::load(&harness.config_path, false).expect("config");
+        let sink =
+            PushoverClient::with_endpoint(&config, &pushover.base_url()).expect("pushover client");
+        check_with_sink(
+            &harness.config_path,
+            false,
+            OutputFormat::Json,
+            FailOn::Never,
+            &at(instant),
+            Some(sink),
+        )
+        .await
+    }
+
+    fn latest_report(harness: &Harness) -> RunReport {
+        let store = StateStore::open_existing(&harness.state).expect("state");
+        store
+            .load_reports(1, None)
+            .expect("reports")
+            .into_iter()
+            .next()
+            .expect("one persisted report")
+    }
+
+    #[tokio::test]
+    async fn a_healthy_run_exits_zero_without_findings() {
+        let server = MockServer::start_async().await;
+        let mocks = serve_golden(&server).await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+
+        let code = run(&harness, FailOn::Never).await.expect("healthy run");
+
+        assert_eq!(code, 0);
+        let report = latest_report(&harness);
+        assert_eq!(report.run_status, RunStatus::Complete);
+        assert_eq!(report.complete_targets, 1);
+        assert!(
+            report.findings.is_empty(),
+            "findings: {:?}",
+            report.findings
+        );
+        assert!(report.transitions.is_empty());
+        assert!(report.health.met);
+        assert_eq!(report.exit.reason, "observation completed");
+        for mock in mocks {
+            mock.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_active_finding_exits_one_only_when_fail_on_matches() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+
+        let ignored = run(&harness, FailOn::Never).await.expect("run");
+        assert_eq!(ignored, 0);
+
+        let escalated = run(&harness, FailOn::Warning).await.expect("run");
+        assert_eq!(escalated, 1);
+
+        let report = latest_report(&harness);
+        assert_eq!(report.exit.code, 1);
+        assert_eq!(report.exit.reason, "finding met fail-on threshold");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.kind == "upstream_mode_drift")
+        );
+
+        let above_threshold = run(&harness, FailOn::Error).await.expect("run");
+        assert_eq!(above_threshold, 0);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_target_exits_three() {
+        let harness = harness(
+            "http://127.0.0.1:1",
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+
+        let code = run(&harness, FailOn::Never).await.expect("run");
+
+        assert_eq!(code, 3);
+        let report = latest_report(&harness);
+        assert_eq!(report.run_status, RunStatus::Unhealthy);
+        assert_eq!(report.complete_targets, 0);
+        assert!(!report.health.met);
+        assert_eq!(
+            report.exit.reason,
+            "minimum complete target count was not met"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_configuration_exits_two() {
+        let directory = tempdir().expect("tempdir");
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "schema_version = 1\nnot valid toml").expect("config");
+
+        let error = check(
             &config_path,
+            false,
+            OutputFormat::Json,
+            FailOn::Never,
+            &at(REFERENCE_INSTANT),
+        )
+        .await
+        .expect_err("an invalid configuration must fail");
+
+        assert_eq!(error.code, 2);
+    }
+
+    #[tokio::test]
+    async fn a_regressed_wall_clock_exits_five_without_advancing_state() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+
+        assert_eq!(run(&harness, FailOn::Never).await.expect("first run"), 0);
+
+        let error = check(
+            &harness.config_path,
+            false,
+            OutputFormat::Json,
+            FailOn::Never,
+            &at("2027-01-15T07:59:59Z"),
+        )
+        .await
+        .expect_err("a regressed wall clock must fail");
+
+        assert_eq!(error.code, 5);
+        let store = StateStore::open_existing(&harness.state).expect("state");
+        assert_eq!(store.load_reports(10, None).expect("reports").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dry_run_never_loads_absent_pushover_credentials() {
+        let server = MockServer::start_async().await;
+        let mocks = serve_golden(&server).await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::PushoverWithAbsentSecrets,
+        );
+
+        let code = check(
+            &harness.config_path,
             true,
             OutputFormat::Json,
             FailOn::Never,
-            &FixedClock::new(timestamp),
+            &at(REFERENCE_INSTANT),
         )
         .await
         .expect("dry run");
+
         assert_eq!(code, 0);
-        let store = StateStore::open_existing(&state).expect("state");
-        assert_eq!(store.load_reports(1, None).expect("report").len(), 1);
-        drop(store);
-        let earlier: Timestamp = "2026-08-17T11:59:59Z".parse().expect("timestamp");
-        let error = check(
-            &config_path,
-            true,
-            OutputFormat::Json,
-            FailOn::Never,
-            &FixedClock::new(earlier),
-        )
-        .await
-        .expect_err("regressed wall clock must fail before observation");
-        assert_eq!(error.code, 5);
+        assert_eq!(latest_report(&harness).mode, sentinel_core::RunMode::DryRun);
         for mock in mocks {
-            mock.assert_async().await;
+            mock.assert_calls_async(1).await;
         }
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_delivery_records_the_remote_request_id() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let pushover = MockServer::start_async().await;
+        let delivery = pushover
+            .mock_async(|when, then| {
+                when.method(POST).path("/");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"status":1,"request":"synthetic-request-id"}"#);
+            })
+            .await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+
+        let code = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
+            .await
+            .expect("run");
+
+        assert_eq!(code, 0);
+        let report = latest_report(&harness);
+        assert_eq!(report.notifications.len(), 1);
+        assert_eq!(
+            report.notifications[0].status,
+            NotificationStatus::Delivered
+        );
+        assert_eq!(
+            report.notifications[0].remote_request_id.as_deref(),
+            Some("synthetic-request-id")
+        );
+        delivery.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn a_retryable_delivery_exits_four() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let pushover = MockServer::start_async().await;
+        let rejected = pushover
+            .mock_async(|when, then| {
+                when.method(POST).path("/");
+                then.status(503);
+            })
+            .await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+
+        let code = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
+            .await
+            .expect("run");
+
+        assert_eq!(code, 4);
+        let report = latest_report(&harness);
+        assert_eq!(
+            report.exit.reason,
+            "notification delivery was not confirmed"
+        );
+        assert_eq!(
+            report.notifications[0].status,
+            NotificationStatus::Retryable
+        );
+        rejected.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_delivery_exits_four_and_is_never_resent() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let pushover = MockServer::start_async().await;
+        let ambiguous = pushover
+            .mock_async(|when, then| {
+                when.method(POST).path("/");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"status":1,"request":""}"#);
+            })
+            .await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+
+        let first = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
+            .await
+            .expect("first run");
+        assert_eq!(first, 4);
+        assert_eq!(
+            latest_report(&harness).notifications[0].status,
+            NotificationStatus::Unknown
+        );
+
+        let second = run_notifying(&harness, &pushover, "2027-01-15T08:05:00Z")
+            .await
+            .expect("second run");
+
+        assert_eq!(second, 0);
+        assert!(latest_report(&harness).notifications.is_empty());
+        ambiguous.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn persisted_reports_match_the_checked_in_run_report_schema() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+        run(&harness, FailOn::Never).await.expect("run");
+
+        let persisted = latest_report(&harness);
+        let value = serde_json::to_value(&persisted).expect("serialize");
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schemas/run-report-v1.schema.json"))
+                .expect("schema");
+
+        let object = value.as_object().expect("a report serializes to an object");
+        let properties = schema["properties"]
+            .as_object()
+            .expect("the schema declares properties");
+        for name in schema["required"]
+            .as_array()
+            .expect("the schema declares required properties")
+        {
+            let name = name.as_str().expect("a required property name");
+            assert!(object.contains_key(name), "report is missing {name}");
+        }
+        for name in object.keys() {
+            assert!(
+                properties.contains_key(name),
+                "report declares undeclared property {name}"
+            );
+        }
+        assert_eq!(value["schema_version"], serde_json::json!(1));
+        assert_eq!(value["state_schema_version"], serde_json::json!(1));
+        assert!(!persisted.findings.is_empty());
+
+        let round_tripped: RunReport =
+            serde_json::from_value(value).expect("a report round trips through its versioned type");
+        assert_eq!(round_tripped.run_id, persisted.run_id);
+    }
+
+    #[test]
+    fn invocation_errors_use_exit_code_two() {
+        let directory = tempdir().expect("tempdir");
+        let state = directory.path().join("state.sqlite");
+
+        assert_eq!(
+            print_schema(SchemaKind::Config, 2)
+                .expect_err("only version 1 exists")
+                .code,
+            2
+        );
+        assert_eq!(
+            report(&state, OutputFormat::Human, 0, None)
+                .expect_err("a zero limit is invalid")
+                .code,
+            2
+        );
+        assert_eq!(
+            report(&state, OutputFormat::Json, 2, None)
+                .expect_err("json output requires a single report")
+                .code,
+            2
+        );
+        assert_eq!(
+            report(&state, OutputFormat::Human, 1, Some("not-a-timestamp"))
+                .expect_err("an invalid since value is rejected")
+                .code,
+            2
+        );
+    }
+
+    #[test]
+    fn an_absent_state_database_exits_five() {
+        let directory = tempdir().expect("tempdir");
+        let state = directory.path().join("absent.sqlite");
+
+        let error = report(&state, OutputFormat::Human, 1, None)
+            .expect_err("an absent state database must fail");
+
+        assert_eq!(error.code, 5);
+    }
+
+    #[test]
+    fn every_documented_exit_code_has_a_distinct_reason() {
+        let reasons: Vec<&str> = (0..=5).map(super::exit_reason).collect();
+        assert_eq!(
+            reasons,
+            [
+                "observation completed",
+                "finding met fail-on threshold",
+                "invocation or configuration error",
+                "minimum complete target count was not met",
+                "notification delivery was not confirmed",
+                "state persistence failed",
+            ]
+        );
+        assert_eq!(super::exit_reason(6), "reserved exit code");
     }
 }

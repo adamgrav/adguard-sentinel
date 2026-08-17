@@ -14,12 +14,22 @@ const MAX_RESPONSE_BYTES: u64 = 65_536;
 #[derive(Debug)]
 pub struct PushoverClient {
     client: reqwest::Client,
+    endpoint: String,
     application_token: SecretString,
     user_key: SecretString,
 }
 
 impl PushoverClient {
     pub fn from_config(config: &Config) -> anyhow::Result<Self> {
+        Self::build(config, ENDPOINT)
+    }
+
+    #[cfg(test)]
+    pub fn with_endpoint(config: &Config, endpoint: &str) -> anyhow::Result<Self> {
+        Self::build(config, endpoint)
+    }
+
+    fn build(config: &Config, endpoint: &str) -> anyhow::Result<Self> {
         let pushover = config
             .notifications
             .pushover
@@ -39,6 +49,7 @@ impl PushoverClient {
             .context("cannot construct Pushover client")?;
         Ok(Self {
             client,
+            endpoint: endpoint.to_owned(),
             application_token,
             user_key,
         })
@@ -54,7 +65,7 @@ impl PushoverClient {
         ];
         let response = self
             .client
-            .post(ENDPOINT)
+            .post(&self.endpoint)
             .header(
                 reqwest::header::USER_AGENT,
                 concat!("adguard-sentinel/", env!("CARGO_PKG_VERSION")),

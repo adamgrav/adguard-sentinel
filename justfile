@@ -20,7 +20,8 @@ build:
 schema-check:
   bash tools/check-schemas.sh
 
-licenses:
-  cargo deny --locked check licenses bans sources
+# Requires network access to refresh the RustSec advisory database.
+supply-chain:
+  cargo deny --locked check advisories licenses bans sources
 
-check: fmt-check lint test build schema-check licenses
+check: fmt-check lint test build schema-check supply-chain
