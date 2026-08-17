@@ -1,10 +1,17 @@
 # Fixture provenance
 
-All API fixtures are synthetic and use RFC 5737 addresses and reserved
-`.invalid` names. Their shapes were authored against AdGuard Home v0.107.78's
-tagged OpenAPI specification and the fields this crate actually requires. They
-are not captured API output, so they contain no query-log records, real client
-identities, credentials, private hostnames, or copied UI content.
+All API fixtures are synthetic. Every address is in an RFC 5737 documentation
+range and every service name is a reserved `.invalid` name. Their shapes were
+authored against AdGuard Home v0.107.78's tagged OpenAPI specification and the
+fields this crate actually requires. They are not captured API output, so they
+contain no query-log records, real client identities, credentials, private
+hostnames, or copied UI content.
+
+The one deliberate exception is the declared upstream set, which names well-known
+public resolver endpoints. Those values are copied from `config.example.toml`,
+where showing real `quic://`, `tls://`, and `https://` upstream syntax is useful
+to a reader. They are public infrastructure identifiers, they are opaque strings
+to this project, and they reveal nothing about any deployment.
 
 ## Reference instant
 

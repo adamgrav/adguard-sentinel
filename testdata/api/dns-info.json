@@ -5,7 +5,7 @@
     "https://cloudflare-dns.com/dns-query"
   ],
   "upstream_dns_file": "",
-  "bootstrap_dns": ["9.9.9.10"],
+  "bootstrap_dns": ["192.0.2.9"],
   "fallback_dns": [],
   "upstream_mode": "",
   "protection_enabled": true,
