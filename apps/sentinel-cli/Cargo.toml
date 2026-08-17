@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Read-only operational and declared-policy monitor for independent AdGuard Home resolvers"
 
 [[bin]]
 name = "adguard-sentinel"

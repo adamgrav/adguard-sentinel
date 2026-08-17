@@ -36,37 +36,60 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Validate a configuration file without contacting any network service.
     ValidateConfig {
+        /// Path to the version-1 TOML configuration.
         #[arg(long)]
         config: PathBuf,
     },
+    /// Observe every configured resolver once, then persist and report the run.
     Check {
+        /// Path to the version-1 TOML configuration.
         #[arg(long)]
         config: PathBuf,
+        /// Perform real read-only observations, but never load or send
+        /// notification credentials. Still writes to the configured state
+        /// database, which is permanently bound to dry-run use after its first
+        /// run.
         #[arg(long)]
         dry_run: bool,
+        /// Output format. Use json or jsonl for automation.
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
+        /// Lowest finding severity that makes this command exit 1. The default
+        /// keeps ordinary findings separate from execution health, which is what
+        /// a service manager should usually see.
         #[arg(long, value_enum, default_value_t = FailOn::Never)]
         fail_on: FailOn,
     },
+    /// Print previously persisted runs from a state database. Read-only.
     Report {
+        /// Path to an existing state database.
         #[arg(long)]
         state: PathBuf,
+        /// Output format. json requires --limit 1; use jsonl for several runs.
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
         format: OutputFormat,
+        /// Maximum number of runs to print, newest first. Between 1 and 10000.
         #[arg(long, default_value_t = 24)]
         limit: usize,
+        /// Only print runs completed at or after this RFC3339 timestamp.
         #[arg(long)]
         since: Option<String>,
     },
+    /// Create a state database, or validate that an existing one is current.
+    /// Never run implicitly by `check`.
     MigrateState {
+        /// Path to the state database to create or validate.
         #[arg(long)]
         state: PathBuf,
     },
+    /// Print a versioned schema for automation or review.
     PrintSchema {
+        /// Which schema to print.
         #[arg(value_enum)]
         kind: SchemaKind,
+        /// Schema version. Only version 1 exists.
         #[arg(long, default_value_t = 1)]
         version: u32,
     },
