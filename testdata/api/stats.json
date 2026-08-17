@@ -1,0 +1,13 @@
+{
+  "time_units": "hours",
+  "num_dns_queries": 100,
+  "num_blocked_filtering": 20,
+  "avg_processing_time": 0.01,
+  "top_queried_domains": [{"discarded.example.invalid": 4}],
+  "top_clients": [{"192.0.2.10": 10}],
+  "top_blocked_domains": [{"discarded-blocked.example.invalid": 2}],
+  "top_upstreams_avg_time": [{"tls://resolver.invalid": 0.02}],
+  "top_upstreams_responses": [{"tls://resolver.invalid": 100}],
+  "dns_queries": [100],
+  "blocked_filtering": [20]
+}

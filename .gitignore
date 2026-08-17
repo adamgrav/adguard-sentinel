@@ -1,0 +1,9 @@
+/target/
+/.direnv/
+/.env.local
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.tmp
+__pycache__/
+*.pyc

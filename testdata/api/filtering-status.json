@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "interval": 24,
+  "filters": [],
+  "whitelist_filters": [],
+  "user_rules": ["||discarded-private-rule.example.invalid^"]
+}

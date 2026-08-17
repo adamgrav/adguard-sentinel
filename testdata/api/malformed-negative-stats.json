@@ -1,0 +1,7 @@
+{
+  "num_dns_queries": 100,
+  "num_blocked_filtering": 20,
+  "avg_processing_time": -0.01,
+  "top_upstreams_avg_time": [],
+  "top_clients": []
+}

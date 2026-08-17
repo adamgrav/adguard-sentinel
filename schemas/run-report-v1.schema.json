@@ -1,0 +1,773 @@
+{
+  "$defs": {
+    "AggregateObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline_age_seconds": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "baseline_ready": {
+          "type": "boolean"
+        },
+        "combined_blocked_ratio": {
+          "format": "double",
+          "type": "number"
+        },
+        "combined_queries": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "local_hour": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ratio_limit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "resolver_query_share": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "object"
+        },
+        "same_hour_samples": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "top_client_share": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "object"
+        },
+        "utc_offset_minutes": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "volume_limit": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "local_hour",
+        "utc_offset_minutes",
+        "combined_queries",
+        "combined_blocked_ratio",
+        "baseline_age_seconds",
+        "same_hour_samples",
+        "baseline_ready",
+        "resolver_query_share",
+        "top_client_share"
+      ],
+      "type": "object"
+    },
+    "AlertDeliveryState": {
+      "enum": [
+        "never",
+        "pending",
+        "delivered",
+        "suppressed",
+        "failed",
+        "unknown",
+        "resolved",
+        "assumed_delivered_legacy"
+      ],
+      "type": "string"
+    },
+    "ConditionEvaluation": {
+      "additionalProperties": false,
+      "properties": {
+        "active_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "clear_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "evidence_source": {
+          "type": "string"
+        },
+        "expected": true,
+        "first_observed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/ConditionLifecycle"
+        },
+        "notification_state": {
+          "$ref": "#/$defs/AlertDeliveryState"
+        },
+        "observation_complete": {
+          "type": "boolean"
+        },
+        "observed": true,
+        "outcome": {
+          "$ref": "#/$defs/EvaluationOutcome"
+        },
+        "recovery_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "severity",
+        "outcome",
+        "summary",
+        "expected",
+        "observed",
+        "evidence_source",
+        "observation_complete",
+        "sustain_runs",
+        "recovery_runs",
+        "active_count",
+        "clear_count",
+        "lifecycle",
+        "notification_state"
+      ],
+      "type": "object"
+    },
+    "ConditionLifecycle": {
+      "enum": [
+        "clear",
+        "pending",
+        "firing"
+      ],
+      "type": "string"
+    },
+    "ConditionTransition": {
+      "additionalProperties": false,
+      "properties": {
+        "condition_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TransitionKind"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "condition_id",
+        "kind",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "DnsObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "upstream_dns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "upstream_mode": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "upstream_mode",
+        "upstream_dns"
+      ],
+      "type": "object"
+    },
+    "EvaluationOutcome": {
+      "enum": [
+        "active",
+        "clear",
+        "not_evaluated"
+      ],
+      "type": "string"
+    },
+    "ExitReport": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "FilterObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "last_updated": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_updated_unix_seconds": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rules_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "server_id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "server_id",
+        "enabled",
+        "rules_count"
+      ],
+      "type": "object"
+    },
+    "Finding": {
+      "additionalProperties": false,
+      "properties": {
+        "consecutive_active": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "consecutive_clear": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "evidence_source": {
+          "type": "string"
+        },
+        "expected": true,
+        "first_observed_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/ConditionLifecycle"
+        },
+        "notification_state": {
+          "$ref": "#/$defs/AlertDeliveryState"
+        },
+        "observation_complete": {
+          "type": "boolean"
+        },
+        "observed": true,
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "target_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "severity",
+        "lifecycle",
+        "consecutive_active",
+        "consecutive_clear",
+        "notification_state",
+        "summary",
+        "expected",
+        "observed",
+        "evidence_source",
+        "observation_complete"
+      ],
+      "type": "object"
+    },
+    "NotificationReport": {
+      "additionalProperties": false,
+      "properties": {
+        "condition_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "error_class": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "remote_request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/NotificationStatus"
+        },
+        "transition": {
+          "$ref": "#/$defs/TransitionKind"
+        }
+      },
+      "required": [
+        "id",
+        "transition",
+        "condition_ids",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NotificationStatus": {
+      "enum": [
+        "pending",
+        "suppressed",
+        "delivered",
+        "retryable",
+        "failed",
+        "unknown",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "OperationalObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "average_processing_seconds": {
+          "format": "double",
+          "type": "number"
+        },
+        "blocked": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "blocked_ratio": {
+          "format": "double",
+          "type": "number"
+        },
+        "maximum_upstream_seconds": {
+          "format": "double",
+          "type": "number"
+        },
+        "protection_enabled": {
+          "type": "boolean"
+        },
+        "queries": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "top_client_share": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "protection_enabled",
+        "queries",
+        "blocked",
+        "blocked_ratio",
+        "average_processing_seconds",
+        "maximum_upstream_seconds",
+        "top_client_share"
+      ],
+      "type": "object"
+    },
+    "RewriteObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "domain",
+        "answer",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "RunHealth": {
+      "additionalProperties": false,
+      "properties": {
+        "complete_targets": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issues": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "met": {
+          "type": "boolean"
+        },
+        "minimum_complete_targets": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "minimum_complete_targets",
+        "complete_targets",
+        "met",
+        "issues"
+      ],
+      "type": "object"
+    },
+    "RunMode": {
+      "enum": [
+        "live",
+        "dry_run",
+        "legacy_import"
+      ],
+      "type": "string"
+    },
+    "RunStatus": {
+      "enum": [
+        "complete",
+        "partial",
+        "unhealthy",
+        "legacy_import"
+      ],
+      "type": "string"
+    },
+    "Severity": {
+      "enum": [
+        "warning",
+        "error",
+        "critical"
+      ],
+      "type": "string"
+    },
+    "TargetReport": {
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "dns": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DnsObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "filtering_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "filters": {
+          "items": {
+            "$ref": "#/$defs/FilterObservation"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "operational": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationalObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rewrites": {
+          "items": {
+            "$ref": "#/$defs/RewriteObservation"
+          },
+          "type": "array"
+        },
+        "rewrites_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "server_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/TargetStatus"
+        },
+        "upstreams": {
+          "items": {
+            "$ref": "#/$defs/UpstreamObservation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status",
+        "complete",
+        "upstreams",
+        "filters",
+        "rewrites"
+      ],
+      "type": "object"
+    },
+    "TargetStatus": {
+      "enum": [
+        "complete",
+        "authentication_rejected",
+        "authentication_cooldown",
+        "unavailable",
+        "invalid_response",
+        "unsupported_version",
+        "response_too_large"
+      ],
+      "type": "string"
+    },
+    "TransitionKind": {
+      "enum": [
+        "alert",
+        "resolution"
+      ],
+      "type": "string"
+    },
+    "UpstreamObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "average_seconds": {
+          "format": "double",
+          "type": "number"
+        },
+        "identity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "average_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:adguard-sentinel:schema:run-report:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "aggregate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AggregateObservation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "complete_targets": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "completed_at": {
+      "type": "string"
+    },
+    "config_sha256": {
+      "type": "string"
+    },
+    "evaluations": {
+      "items": {
+        "$ref": "#/$defs/ConditionEvaluation"
+      },
+      "type": "array"
+    },
+    "exit": {
+      "$ref": "#/$defs/ExitReport"
+    },
+    "expected_targets": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/Finding"
+      },
+      "type": "array"
+    },
+    "health": {
+      "$ref": "#/$defs/RunHealth"
+    },
+    "minimum_complete_targets": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "mode": {
+      "$ref": "#/$defs/RunMode"
+    },
+    "notifications": {
+      "items": {
+        "$ref": "#/$defs/NotificationReport"
+      },
+      "type": "array"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "run_status": {
+      "$ref": "#/$defs/RunStatus"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "state_schema_version": {
+      "const": 1
+    },
+    "targets": {
+      "items": {
+        "$ref": "#/$defs/TargetReport"
+      },
+      "type": "array"
+    },
+    "transitions": {
+      "items": {
+        "$ref": "#/$defs/ConditionTransition"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "mode",
+    "started_at",
+    "completed_at",
+    "config_sha256",
+    "state_schema_version",
+    "run_status",
+    "expected_targets",
+    "complete_targets",
+    "minimum_complete_targets",
+    "targets",
+    "evaluations",
+    "findings",
+    "transitions",
+    "notifications",
+    "health",
+    "exit"
+  ],
+  "title": "RunReport",
+  "type": "object"
+}

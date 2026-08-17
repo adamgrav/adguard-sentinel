@@ -1,0 +1,4 @@
+{
+  "upstream_dns": ["tls://resolver.invalid"],
+  "upstream_mode": "load_balance"
+}

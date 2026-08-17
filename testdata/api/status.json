@@ -1,0 +1,10 @@
+{
+  "dns_addresses": ["192.0.2.53"],
+  "dns_port": 53,
+  "http_port": 3001,
+  "protection_enabled": true,
+  "protection_disabled_until": null,
+  "running": true,
+  "version": "v0.107.78",
+  "language": "en"
+}
