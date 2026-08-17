@@ -6,7 +6,7 @@
 crates/
   sentinel-core/       configuration, reports, analysis, findings, latches
   sentinel-adguard/    fixed read-only client and strict response decoding
-  sentinel-store/      SQLite schema, migrations, retention, legacy import
+  sentinel-store/      SQLite schema, migrations, retention, state and outbox
 apps/
   sentinel-cli/        CLI, orchestration, Pushover, exit arbitration
 ```

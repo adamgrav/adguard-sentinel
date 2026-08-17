@@ -2,9 +2,9 @@
 
 ## Outcome
 
-The standalone MVP is implemented on the uncommitted `feat/mvp` branch. The
-dotfiles repository was not edited. No remote, commit, live AdGuard request,
-real Pushover message, NixOS module, rebuild, switch, or deployment was created.
+The standalone MVP is implemented on `feat/mvp`. The dotfiles repository was
+not edited. No remote, live AdGuard request, real Pushover message, NixOS module,
+rebuild, switch, or deployment was created.
 
 Implemented:
 
@@ -12,24 +12,21 @@ Implemented:
 - Strict version-1 TOML configuration and generated JSON Schema.
 - Six-method private AdGuard GET allowlist with rustls, no redirects/proxy,
   Basic Auth redaction, timeouts, and response-size enforcement.
-- Strict operational parsing, declared policy checks, Python-compatible
-  behavior formulas, independent target state, and bounded concurrency.
+- Strict operational parsing, declared policy checks, documented behavior
+  formulas, independent target state, and bounded concurrency.
 - SQLite v1 with checksummed schema, transactions, retention, latches, auth
   cooldowns, detailed observations, transactional outbox, and read-only reports.
-- Full validated Python JSON v1 import through a temporary sibling and atomic
-  rename, leaving the source untouched.
 - Pushover delivery classification for delivered, retryable, permanent, and
   ambiguous outcomes. Ambiguous outcomes are never resent automatically.
 - Dry/live state separation and dry-run proof that Pushover credentials are not
   loaded.
-- Generated schemas, synthetic fixtures, frozen Python oracle/provenance,
-  package/dev-shell flake, licenses, dependency policy, pinned CI actions, and
-  operator documentation.
+- Generated schemas, synthetic API fixtures, package/dev-shell flake, licenses,
+  dependency policy, pinned CI actions, and operator documentation.
 
 Privacy hardening: external Pushover payloads contain condition summaries only.
 Structured expected/observed values and error detail remain local in SQLite and
-the versioned report. This intentionally narrows the old Python notification
-detail while preserving batching, priorities, latching, and resolution rules.
+the versioned report. This preserves batching, priorities, latching, and
+resolution rules without exporting structured evidence.
 
 ## Validation executed
 
@@ -40,10 +37,9 @@ run against the full uncommitted repository rather than Git's tracked-file view.
   - `cargo fmt --all -- --check`
   - `nixfmt --check flake.nix`
   - Clippy for workspace/all targets/all features with `-D warnings`
-  - 28 Rust unit/integration tests and doc tests
+  - Rust unit/integration tests and doc tests
   - workspace build for all targets/features
   - generated schema drift check
-  - frozen Python healthy-sequence and invalid-default divergence check
   - cargo-deny license, ban, and source checks
 - `nix flake check path:<checkout>` — passed and built the native
   aarch64-Darwin package derivation.
@@ -67,14 +63,13 @@ public webpki root-data dependency.
 - Live AdGuard version/response compatibility, TLS, credentials, network
   reachability, timing, and zero-mutation traffic are not proven.
 - Real Pushover delivery, Healthchecks, systemd sandboxing/timer behavior,
-  eight-day shadow parity, state import on the monitor host, cutover, and
-  rollback are not proven.
+  direct deployment, cutover, and rollback are not proven.
 - No transitive notices artifact or public-release legal review has been done.
 
 ## Required next task
 
-Review this repository, commit it intentionally, run the normal tracked-clone
-commands, and obtain a real x86_64-Linux build. Only then begin the separate
-dotfiles shadow-integration task. That task still requires Adam's authorization
-for source pinning, dotfiles edits, test-notification credentials, build/switch,
-shadow acceptance, and cutover.
+Run the normal tracked-clone commands and obtain a real x86_64-Linux build on
+the monitor host. Then follow `docs/DEPLOYMENT.md` and prepare the separate
+dotfiles integration. That task still requires Adam's authorization for source
+pinning, dotfiles edits, test-notification credentials, build/switch, and
+cutover.

@@ -620,9 +620,7 @@ pub fn advance_condition(
                 if was_firing
                     && matches!(
                         state.alert_delivery_state,
-                        AlertDeliveryState::Delivered
-                            | AlertDeliveryState::Suppressed
-                            | AlertDeliveryState::AssumedDeliveredLegacy
+                        AlertDeliveryState::Delivered | AlertDeliveryState::Suppressed
                     )
                 {
                     state.last_transition_run = Some(run_id.to_owned());
@@ -784,7 +782,7 @@ mod tests {
     };
 
     #[test]
-    fn robust_bounds_match_python_contract() {
+    fn robust_bounds_match_behavior_contract() {
         let (median, deviation) = robust_bounds(&[1.0, 2.0, 3.0]).expect("bounds");
         assert!((median - 2.0).abs() < f64::EPSILON);
         assert!((deviation - 1.4826).abs() < 1e-12);
@@ -903,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn europe_amsterdam_dst_hours_match_python_wall_hour_contract() {
+    fn europe_amsterdam_dst_hours_match_wall_hour_contract() {
         let first_repeated: Timestamp = "2026-10-25T00:30:00Z".parse().expect("timestamp");
         let second_repeated: Timestamp = "2026-10-25T01:30:00Z".parse().expect("timestamp");
         assert_eq!(
@@ -1014,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_latency_boundaries_and_protection_sustain_match_python() {
+    fn strict_latency_boundaries_and_protection_sustain_match_contract() {
         let target_config = TargetConfig {
             id: "a".to_owned(),
             name: "Resolver A".to_owned(),

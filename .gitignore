@@ -5,5 +5,3 @@
 *.sqlite-shm
 *.sqlite-wal
 *.tmp
-__pycache__/
-*.pyc

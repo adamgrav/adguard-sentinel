@@ -18,8 +18,7 @@ identity. JSONL is a sequence of complete v1 report objects.
 
 `schemas/state-v1.sql` is canonical private state. `PRAGMA user_version` and a
 checksummed migration row must both equal one. `check` creates a new v1 database
-but refuses other existing versions; `migrate-state` owns explicit upgrades and
-legacy import.
+but refuses other existing versions; `migrate-state` owns explicit upgrades.
 
 Run `tools/update-schemas.sh` after an intentional public type change and commit
 the corresponding schema/version/ADR change together. `just schema-check`

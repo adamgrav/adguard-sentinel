@@ -8,21 +8,13 @@ CREATE TABLE schema_migrations (
   applied_at TEXT NOT NULL
 ) STRICT;
 
-CREATE TABLE legacy_imports (
-  id TEXT PRIMARY KEY,
-  source_sha256 TEXT NOT NULL UNIQUE,
-  source_version INTEGER NOT NULL,
-  imported_at TEXT NOT NULL,
-  target_mapping_json TEXT NOT NULL
-) STRICT;
-
 CREATE TABLE runs (
   id TEXT PRIMARY KEY,
   started_at TEXT NOT NULL,
   completed_at TEXT NOT NULL,
-  mode TEXT NOT NULL CHECK (mode IN ('live', 'dry_run', 'legacy_import')),
+  mode TEXT NOT NULL CHECK (mode IN ('live', 'dry_run')),
   config_sha256 TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('complete', 'partial', 'unhealthy', 'legacy_import')),
+  status TEXT NOT NULL CHECK (status IN ('complete', 'partial', 'unhealthy')),
   expected_targets INTEGER NOT NULL CHECK (expected_targets >= 0),
   complete_targets INTEGER NOT NULL CHECK (complete_targets >= 0),
   minimum_targets INTEGER NOT NULL CHECK (minimum_targets >= 0),
@@ -122,7 +114,7 @@ CREATE TABLE condition_state (
   active_count INTEGER NOT NULL CHECK (active_count >= 0),
   clear_count INTEGER NOT NULL CHECK (clear_count >= 0),
   alert_delivery_state TEXT NOT NULL CHECK (alert_delivery_state IN (
-    'never', 'pending', 'delivered', 'suppressed', 'failed', 'unknown', 'resolved', 'assumed_delivered_legacy'
+    'never', 'pending', 'delivered', 'suppressed', 'failed', 'unknown', 'resolved'
   )),
   last_transition_run TEXT
 ) STRICT;

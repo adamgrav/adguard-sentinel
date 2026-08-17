@@ -20,10 +20,7 @@ build:
 schema-check:
   bash tools/check-schemas.sh
 
-fixture-parity:
-  python3 tools/fixture_parity.py
-
 licenses:
   cargo deny --locked check licenses bans sources
 
-check: fmt-check lint test build schema-check fixture-parity licenses
+check: fmt-check lint test build schema-check licenses

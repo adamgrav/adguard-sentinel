@@ -93,7 +93,6 @@
               pkgs.git
               pkgs.just
               pkgs.nixfmt
-              pkgs.python3
               rustToolchain
             ];
           };

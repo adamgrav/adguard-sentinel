@@ -84,8 +84,7 @@
         "suppressed",
         "failed",
         "unknown",
-        "resolved",
-        "assumed_delivered_legacy"
+        "resolved"
       ],
       "type": "string"
     },
@@ -504,8 +503,7 @@
     "RunMode": {
       "enum": [
         "live",
-        "dry_run",
-        "legacy_import"
+        "dry_run"
       ],
       "type": "string"
     },
@@ -513,8 +511,7 @@
       "enum": [
         "complete",
         "partial",
-        "unhealthy",
-        "legacy_import"
+        "unhealthy"
       ],
       "type": "string"
     },

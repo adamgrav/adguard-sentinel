@@ -5,8 +5,9 @@ independent AdGuard Home resolvers. It has no AdGuard mutation API and never
 retrieves query logs.
 
 The project is pre-release. Read [the product contract](docs/PRODUCT.md),
-[MVP scope](docs/MVP_SCOPE.md), and [architecture](docs/ARCHITECTURE.md) before
-using it.
+[MVP scope](docs/MVP_SCOPE.md), [behavior contract](docs/BEHAVIOR.md),
+[architecture](docs/ARCHITECTURE.md), and [deployment guide](docs/DEPLOYMENT.md)
+before using it.
 
 ## Development
 

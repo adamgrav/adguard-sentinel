@@ -23,8 +23,7 @@ notifications.
 - Dry-run performs real read-only observations and evolves its selected state
   database, but never loads or sends notification credentials.
 - A state database is permanently bound to live or dry-run observations after
-  its first non-legacy run, preventing shadow execution from advancing live
-  latches.
+  its first run, preventing a dry-run from advancing live latches.
 - SQLite is private runtime state. Versioned JSON is the automation interface.
 - There is no telemetry.
 

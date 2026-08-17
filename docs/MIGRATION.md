@@ -6,21 +6,10 @@ Migrations are explicit and transactional. The running `check` command never
 upgrades an existing schema. Each future released schema must include forward
 fixtures from every prior version and preserve a pre-migration backup.
 
-## Python JSON v1
+Schema v1 has no predecessor. `migrate-state --state PATH` creates or validates
+the current database and refuses unsupported versions. It does not infer,
+convert, or delete external state.
 
-```sh
-adguard-sentinel migrate-state \
-  --legacy-json /path/to/state.json \
-  --state /path/to/state.sqlite \
-  --config /path/to/config.toml
-```
-
-The importer reads and hashes the JSON, validates every record and target
-mapping, creates a private temporary SQLite sibling, imports samples, latest
-observations, cooldowns, counters, and delivery latches in one transaction, then
-atomically renames the new database. Any invalid or unknown record rejects the
-whole import. The source is never renamed, rewritten, or removed.
-
-Legacy `notified=true` means assumed delivered because Python only writes that
-flag after successful Pushover return. Unknown first-observed timestamps remain
-null rather than being fabricated.
+The first deployment starts a fresh behavioral baseline. This is intentional:
+operational and policy findings are immediately active, while query-volume and
+blocked-ratio findings wait for their configured learning window.

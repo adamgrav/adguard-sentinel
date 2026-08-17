@@ -10,10 +10,11 @@
   response-size limits.
 - Per-target operational and policy findings plus one explicit behavior group.
 - Pushover as the only notification sink.
-- SQLite schema v1, explicit migration, bounded retention, transactional outbox,
-  and Python JSON v1 import.
+- SQLite schema v1, explicit migration, bounded retention, and a transactional
+  outbox.
 - Versioned config and run-report schemas.
-- Synthetic fixture parity and a frozen Python reference oracle.
+- Synthetic API fixtures and deterministic behavior, transport, state, and CLI
+  tests.
 - A Nix package, checks, and development shell. The release claim is limited to
   x86_64 Linux only after that package is actually built there.
 

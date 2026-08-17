@@ -36,7 +36,6 @@ impl FromStr for Severity {
 pub enum RunMode {
     Live,
     DryRun,
-    LegacyImport,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -45,7 +44,6 @@ pub enum RunStatus {
     Complete,
     Partial,
     Unhealthy,
-    LegacyImport,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -224,7 +222,6 @@ pub enum AlertDeliveryState {
     Failed,
     Unknown,
     Resolved,
-    AssumedDeliveredLegacy,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

@@ -1522,7 +1522,7 @@ mod tests {
                    id, started_at, completed_at, mode, config_sha256, status,
                    expected_targets, complete_targets, minimum_targets, exit_code
                  ) VALUES (?1, ?2, ?2, 'dry_run', 'sha256:synthetic', 'complete', 1, 1, 1, 0)",
-                params!["shadow", "2026-01-01T00:00:00Z"],
+                params!["dry-run", "2026-01-01T00:00:00Z"],
             )
             .expect("insert");
         store

@@ -63,10 +63,6 @@ enum Command {
     MigrateState {
         #[arg(long)]
         state: PathBuf,
-        #[arg(long, requires = "config")]
-        legacy_json: Option<PathBuf>,
-        #[arg(long, requires = "legacy_json")]
-        config: Option<PathBuf>,
     },
     PrintSchema {
         #[arg(value_enum)]
@@ -157,11 +153,7 @@ async fn execute(cli: Cli) -> Result<u8, CommandError> {
             limit,
             since,
         } => report(&state, format, limit, since.as_deref()),
-        Command::MigrateState {
-            state,
-            legacy_json,
-            config,
-        } => migrate_state(&state, legacy_json.as_deref(), config.as_deref()),
+        Command::MigrateState { state } => migrate_state(&state),
         Command::PrintSchema { kind, version } => print_schema(kind, version),
     }
 }
@@ -505,34 +497,12 @@ fn report(
     Ok(0)
 }
 
-fn migrate_state(
-    state: &Path,
-    legacy_json: Option<&Path>,
-    config_path: Option<&Path>,
-) -> Result<u8, CommandError> {
-    if let Some(source) = legacy_json {
-        let config_path = config_path.ok_or_else(|| {
-            CommandError::invocation(anyhow!("--config is required with --legacy-json"))
-        })?;
-        let config = Config::load(config_path, false).map_err(CommandError::invocation)?;
-        let summary =
-            StateStore::import_legacy_json(source, state, &config, &Timestamp::now().to_string())
-                .map_err(CommandError::state)?;
-        println!(
-            "imported legacy state: samples={} conditions={} auth_cooldowns={} latest_targets={} source={}",
-            summary.samples,
-            summary.conditions,
-            summary.auth_cooldowns,
-            summary.latest_targets,
-            summary.source_sha256
-        );
-    } else {
-        let store = StateStore::open(state).map_err(CommandError::state)?;
-        println!(
-            "state schema is current (version {})",
-            store.schema_version()
-        );
-    }
+fn migrate_state(state: &Path) -> Result<u8, CommandError> {
+    let store = StateStore::open(state).map_err(CommandError::state)?;
+    println!(
+        "state schema is current (version {})",
+        store.schema_version()
+    );
     Ok(0)
 }
 

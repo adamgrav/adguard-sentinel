@@ -24,8 +24,8 @@ This register must be refreshed when either lock changes.
 | url | target URL validation | runtime | MIT OR Apache-2.0 |
 | uuid | opaque run and outbox identifiers | runtime | MIT OR Apache-2.0 |
 
-Nix supplies the exact compiler, Cargo, Python parity runner, Just, formatter,
-and cargo-deny. SQLite is built through rusqlite's bundled feature. A generated
+Nix supplies the exact compiler, Cargo, Just, formatter, and cargo-deny. SQLite
+is built through rusqlite's bundled feature. A generated
 transitive notice report remains required before public release.
 
 `webpki-roots`, reached through reqwest/rustls, includes Mozilla's public root
