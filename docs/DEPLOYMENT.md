@@ -23,10 +23,9 @@ time beyond fetching crates.
 ## Install with Nix
 
 This is the first-class path and the only one with reproducibility guarantees.
-Replace `OWNER` below with this repository's owner.
 
 ```sh
-nix build github:OWNER/adguard-sentinel
+nix build github:adamgrav/adguard-sentinel
 ./result/bin/adguard-sentinel --help
 ```
 
@@ -42,7 +41,7 @@ nix build
 ## Install on generic Linux from source
 
 ```sh
-git clone https://github.com/OWNER/adguard-sentinel
+git clone https://github.com/adamgrav/adguard-sentinel
 cd adguard-sentinel
 cargo build --locked --release
 install -Dm755 target/release/adguard-sentinel /usr/local/bin/adguard-sentinel
@@ -96,7 +95,7 @@ below are an example to adapt rather than a supported interface.
 ```ini
 [Unit]
 Description=AdGuard Sentinel read-only resolver observation
-Documentation=https://github.com/OWNER/adguard-sentinel
+Documentation=https://github.com/adamgrav/adguard-sentinel
 After=network-online.target
 Wants=network-online.target
 
