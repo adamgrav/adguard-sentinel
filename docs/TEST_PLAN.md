@@ -1,6 +1,6 @@
 # Test plan
 
-`just test` is authoritative. The suite is 67 deterministic tests and contacts no
+`just test` is authoritative. The suite is 71 deterministic tests and contacts no
 live AdGuard Home or Pushover service.
 
 Rows are marked *thin* where a representative test exists but not the full case
@@ -82,6 +82,14 @@ Every documented code also has a distinct reason string.
 - A confirmed delivery records the remote request identifier.
 - An ambiguous delivery is recorded as unknown and is never resent on a later
   run, because the outbox only re-selects pending and retryable rows.
+- A request carries exactly the declared Pushover fields: the application token,
+  the user key, a title, a message, and a priority.
+- A sustained condition alerts at normal priority, its recovery resolves once at
+  quiet priority `-1`, and a third healthy run sends nothing further.
+- No credential reaches a persisted report. Distinct sentinel secrets are
+  asserted absent from the serialized report for both a permanently rejected
+  notification and a rejected AdGuard password, along with any `Basic ` header
+  material.
 - A persisted report carries every property the checked-in run-report schema
   requires, declares no property the schema does not, pins both schema versions
   to `1`, and round-trips back through `RunReport`. Because the schema is

@@ -35,6 +35,7 @@ forward-compatible patch releases.
 | File | Asserts |
 | --- | --- |
 | `api/dns-info-explicit-mode.json` | An explicit `load_balance` mode is preserved unchanged |
+| `api/dns-info-parallel-mode.json` | A declared mode other than the golden one, used to drive a resolution after an alert |
 
 ## Fail-closed set
 

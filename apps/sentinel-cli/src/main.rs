@@ -743,6 +743,13 @@ mod tests {
     const DECLARED_MODE: &str = "load_balance";
     const DRIFTED_MODE: &str = "parallel";
 
+    const ADGUARD_PASSWORD: &str = "adguard-password-must-not-leak";
+    const PUSHOVER_TOKEN: &str = "pushover-token-must-not-leak";
+    const PUSHOVER_USER_KEY: &str = "pushover-user-key-must-not-leak";
+
+    const DNS_INFO_PARALLEL: &str =
+        include_str!("../../../testdata/api/dns-info-parallel-mode.json");
+
     const GOLDEN: [(&str, &str); 6] = [
         (
             "/control/status",
@@ -783,9 +790,12 @@ mod tests {
         state: PathBuf,
     }
 
-    async fn serve_golden(server: &MockServer) -> Vec<Mock<'_>> {
-        let mut mocks = Vec::with_capacity(GOLDEN.len());
-        for (path, body) in GOLDEN {
+    async fn serve<'server>(
+        server: &'server MockServer,
+        bodies: &[(&'static str, &'static str)],
+    ) -> Vec<Mock<'server>> {
+        let mut mocks = Vec::with_capacity(bodies.len());
+        for (path, body) in bodies.iter().copied() {
             mocks.push(
                 server
                     .mock_async(move |when, then| {
@@ -800,6 +810,24 @@ mod tests {
         mocks
     }
 
+    async fn serve_golden(server: &MockServer) -> Vec<Mock<'_>> {
+        serve(server, &GOLDEN).await
+    }
+
+    async fn serve_golden_replacing<'server>(
+        server: &'server MockServer,
+        path: &str,
+        body: &'static str,
+    ) -> Vec<Mock<'server>> {
+        let mut bodies = GOLDEN;
+        for entry in &mut bodies {
+            if entry.0 == path {
+                entry.1 = body;
+            }
+        }
+        serve(server, &bodies).await
+    }
+
     fn harness(
         base_url: &str,
         upstream_mode: &str,
@@ -808,11 +836,11 @@ mod tests {
     ) -> Harness {
         let directory = tempdir().expect("tempdir");
         let password = directory.path().join("password");
-        fs::write(&password, "synthetic\n").expect("password");
+        fs::write(&password, format!("{ADGUARD_PASSWORD}\n")).expect("password");
         let token = directory.path().join("pushover-token");
         let user = directory.path().join("pushover-user");
-        fs::write(&token, "synthetic-token\n").expect("token");
-        fs::write(&user, "synthetic-user\n").expect("user");
+        fs::write(&token, format!("{PUSHOVER_TOKEN}\n")).expect("token");
+        fs::write(&user, format!("{PUSHOVER_USER_KEY}\n")).expect("user");
         let notifications = match notifications {
             Notifications::Disabled => "[notifications]\nprovider = \"disabled\"".to_owned(),
             Notifications::Pushover => pushover_block(&token, &user),
@@ -1191,6 +1219,160 @@ allow_insecure_local_http = false
         assert_eq!(second, 0);
         assert!(latest_report(&harness).notifications.is_empty());
         ambiguous.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn a_notification_carries_only_the_declared_pushover_fields() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let pushover = MockServer::start_async().await;
+        let declared = pushover
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .form_urlencoded_tuple("token", PUSHOVER_TOKEN)
+                    .form_urlencoded_tuple("user", PUSHOVER_USER_KEY)
+                    .form_urlencoded_tuple("priority", "0")
+                    .form_urlencoded_tuple_exists("title")
+                    .form_urlencoded_tuple_exists("message");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"status":1,"request":"synthetic-request-id"}"#);
+            })
+            .await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+
+        let code = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
+            .await
+            .expect("run");
+
+        assert_eq!(code, 0);
+        declared.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn an_alert_resolves_quietly_exactly_once() {
+        let server = MockServer::start_async().await;
+        let _drifted = serve_golden(&server).await;
+        let pushover = MockServer::start_async().await;
+        let alert = pushover
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .form_urlencoded_tuple("priority", "0");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"status":1,"request":"alert-request-id"}"#);
+            })
+            .await;
+        let resolution = pushover
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .form_urlencoded_tuple("priority", "-1");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"status":1,"request":"resolution-request-id"}"#);
+            })
+            .await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+
+        assert_eq!(
+            run_notifying(&harness, &pushover, "2027-01-15T08:00:00Z")
+                .await
+                .expect("alert run"),
+            0
+        );
+        alert.assert_calls_async(1).await;
+        resolution.assert_calls_async(0).await;
+
+        server.reset_async().await;
+        let _recovered =
+            serve_golden_replacing(&server, "/control/dns_info", DNS_INFO_PARALLEL).await;
+
+        assert_eq!(
+            run_notifying(&harness, &pushover, "2027-01-15T08:05:00Z")
+                .await
+                .expect("resolution run"),
+            0
+        );
+        let resolved = latest_report(&harness);
+        assert!(resolved.findings.is_empty());
+        assert_eq!(resolved.transitions.len(), 1);
+        assert_eq!(
+            resolved.notifications[0].remote_request_id.as_deref(),
+            Some("resolution-request-id")
+        );
+
+        assert_eq!(
+            run_notifying(&harness, &pushover, "2027-01-15T08:10:00Z")
+                .await
+                .expect("steady run"),
+            0
+        );
+        assert!(latest_report(&harness).notifications.is_empty());
+        alert.assert_calls_async(1).await;
+        resolution.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn credentials_never_reach_a_persisted_report() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let pushover = MockServer::start_async().await;
+        let _rejected = pushover
+            .mock_async(|when, then| {
+                when.method(POST).path("/");
+                then.status(400)
+                    .header("content-type", "application/json")
+                    .body(r#"{"status":0,"request":"rejected-request-id","errors":["invalid"]}"#);
+            })
+            .await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+
+        let code = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
+            .await
+            .expect("run");
+        assert_eq!(code, 4);
+
+        let serialized = serde_json::to_string(&latest_report(&harness)).expect("serialize");
+        for secret in [ADGUARD_PASSWORD, PUSHOVER_TOKEN, PUSHOVER_USER_KEY] {
+            assert!(
+                !serialized.contains(secret),
+                "a persisted report leaked {secret}"
+            );
+        }
+        assert!(!serialized.contains("Basic "));
+        assert!(serialized.contains("pushover_permanent_rejection"));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_password_never_reaches_the_report_or_the_error() {
+        let server = MockServer::start_async().await;
+        let _unauthorized = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/control/status");
+                then.status(401);
+            })
+            .await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+
+        let code = run(&harness, FailOn::Never).await.expect("run");
+
+        assert_eq!(code, 3);
+        let report = latest_report(&harness);
+        assert_eq!(
+            report.targets[0].error_kind.as_deref(),
+            Some("authentication_rejected")
+        );
+        let serialized = serde_json::to_string(&report).expect("serialize");
+        assert!(!serialized.contains(ADGUARD_PASSWORD));
+        assert!(!serialized.contains("Basic "));
     }
 
     #[tokio::test]

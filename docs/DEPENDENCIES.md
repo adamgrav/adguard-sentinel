@@ -36,3 +36,23 @@ verification and does not contain application code or private trust material.
 Jiff's IANA database is embedded so named-zone behavior is hermetic in Nix build
 sandboxes and systemd services. Dependency updates must review the bundled tzdb
 release as well as the Jiff code version.
+
+## Accepted duplicate versions
+
+`cargo deny` reports `multiple-versions = "warn"` rather than `deny`, so the
+following transitive duplicates are accepted rather than forced into a single
+version. Each pair exists because two independent upstream crates depend on
+different major versions; resolving them would require patching or pinning
+dependencies away from their published requirements, which is a larger risk than
+carrying the duplicate. Review this table whenever `Cargo.lock` changes.
+
+| Crate | Versions | Reason |
+| --- | --- | --- |
+| getrandom | 0.2, 0.4 | Two generations of the randomness API are pulled in by separate dependents |
+| hashbrown | 0.15, 0.17 | Interior map dependency of crates that upgraded on different schedules |
+| syn | 2, 3 | Proc-macro dependency; build-time only, absent from the binary |
+| windows-sys | 0.52, 0.61 | Platform bindings; not reached in the Linux or macOS builds this project targets |
+| winnow | 0.7, 1.0 | `toml` and its own `toml_parser` currently resolve to different majors |
+
+None of these is a security advisory. `just supply-chain` enforces advisories,
+licenses, bans, and sources, and would fail on a real vulnerability.
