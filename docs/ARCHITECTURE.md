@@ -38,6 +38,27 @@ The CLI is the only application boundary. Domain errors remain typed below it.
 Clocks, the AdGuard reader, notification sink, and state repository are
 injectable. All project crates forbid unsafe Rust.
 
+## Panic policy
+
+No panic may be reachable from external data. Every AdGuard response, Pushover
+response, configuration file, and state database is handled with typed errors.
+The remaining non-test `expect` calls are limited to invariants established
+earlier in the same function or by configuration validation that has already
+succeeded:
+
+- Policy, condition-profile, password, and per-target report lookups in the CLI
+  are keyed by identifiers that `Config::validate` has already proved present and
+  unique.
+- The two single-entry map reads in the AdGuard decoder are guarded by an
+  explicit length check on the line above.
+- Serializing a condition's expected and observed values, and fingerprinting a
+  configuration, operate on types that cannot fail to serialize. Paths reach
+  those types only from TOML, which is UTF-8 by definition.
+- The state schema version converts a compile-time constant.
+
+Adding an `expect` outside those categories is a change to this policy and needs
+a typed error instead.
+
 ## Evidence boundaries
 
 Fixture and mock-server checks prove deterministic domain and transport

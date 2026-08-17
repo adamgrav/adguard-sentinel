@@ -1,6 +1,6 @@
 # Test plan
 
-`just test` is authoritative. The suite is 71 deterministic tests and contacts no
+`just test` is authoritative. The suite is 74 deterministic tests and contacts no
 live AdGuard Home or Pushover service.
 
 Rows are marked *thin* where a representative test exists but not the full case
@@ -100,6 +100,11 @@ Every documented code also has a distinct reason string.
 - Migration tests per released schema version. *absent*; v1 has no predecessor.
 
 ## Notification transport
+
+Delivery outcomes separate "definitely not sent" from "possibly sent", which is
+what ADR 0006 rests on. A refused connection before any response is retryable. A
+timeout after transmission, and an oversized response body, are both ambiguous
+and therefore never resent automatically.
 
 `PushoverClient::from_config` is the only constructor reachable outside tests and
 always uses the fixed production endpoint. A `#[cfg(test)]` constructor accepts

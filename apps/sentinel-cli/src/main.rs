@@ -636,7 +636,10 @@ fn baseline_profile(config: &Config) -> anyhow::Result<&sentinel_core::Condition
 fn output_reports(reports: &[RunReport], format: OutputFormat) -> anyhow::Result<()> {
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&reports[0])?);
+            let report = reports
+                .first()
+                .ok_or_else(|| anyhow!("no report is available to render"))?;
+            println!("{}", serde_json::to_string_pretty(report)?);
         }
         OutputFormat::Jsonl => {
             for report in reports {
@@ -726,12 +729,15 @@ fn exit_reason(code: u8) -> &'static str {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use httpmock::Method::{GET, POST};
     use httpmock::{Mock, MockServer};
     use jiff::Timestamp;
-    use sentinel_core::{Config, FixedClock, NotificationStatus, RunReport, RunStatus};
-    use sentinel_store::StateStore;
+    use sentinel_core::{
+        Config, FixedClock, NotificationStatus, OutboxMessage, RunReport, RunStatus, TransitionKind,
+    };
+    use sentinel_store::{NotificationAttemptOutcome, StateStore};
     use tempfile::{TempDir, tempdir};
 
     use super::{
@@ -1313,6 +1319,95 @@ allow_insecure_local_http = false
         assert!(latest_report(&harness).notifications.is_empty());
         alert.assert_calls_async(1).await;
         resolution.assert_calls_async(1).await;
+    }
+
+    fn alert_message() -> OutboxMessage {
+        OutboxMessage {
+            id: "synthetic-outbox-id".to_owned(),
+            run_id: "synthetic-run-id".to_owned(),
+            transition: TransitionKind::Alert,
+            title: "AdGuard Sentinel".to_owned(),
+            message: "synthetic condition summary".to_owned(),
+            priority: 0,
+            status: NotificationStatus::Pending,
+            condition_ids: vec!["target:resolver-a:upstream-mode".to_owned()],
+        }
+    }
+
+    fn pushover_client(harness: &Harness, endpoint: &str, timeout_ms: u64) -> PushoverClient {
+        let mut config = Config::load(&harness.config_path, false).expect("config");
+        config.observation.notification_timeout_ms = timeout_ms;
+        PushoverClient::with_endpoint(&config, endpoint).expect("pushover client")
+    }
+
+    fn unreachable_harness() -> Harness {
+        harness(
+            "http://127.0.0.1:1",
+            DECLARED_MODE,
+            1,
+            Notifications::Pushover,
+        )
+    }
+
+    #[tokio::test]
+    async fn an_oversized_notification_response_is_ambiguous() {
+        let pushover = MockServer::start_async().await;
+        let _oversized = pushover
+            .mock_async(|when, then| {
+                when.method(POST).path("/");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body("x".repeat(70_000));
+            })
+            .await;
+        let harness = unreachable_harness();
+
+        let outcome = pushover_client(&harness, &pushover.base_url(), 5_000)
+            .send(&alert_message())
+            .await;
+
+        assert!(matches!(
+            outcome,
+            NotificationAttemptOutcome::Unknown { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_notification_timeout_is_ambiguous_rather_than_retryable() {
+        let pushover = MockServer::start_async().await;
+        let _slow = pushover
+            .mock_async(|when, then| {
+                when.method(POST).path("/");
+                then.status(200)
+                    .delay(Duration::from_millis(300))
+                    .header("content-type", "application/json")
+                    .body(r#"{"status":1,"request":"synthetic-request-id"}"#);
+            })
+            .await;
+        let harness = unreachable_harness();
+
+        let outcome = pushover_client(&harness, &pushover.base_url(), 50)
+            .send(&alert_message())
+            .await;
+
+        assert!(matches!(
+            outcome,
+            NotificationAttemptOutcome::Unknown { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_connection_failure_before_a_response_stays_retryable() {
+        let harness = unreachable_harness();
+
+        let outcome = pushover_client(&harness, "http://127.0.0.1:1", 5_000)
+            .send(&alert_message())
+            .await;
+
+        assert!(matches!(
+            outcome,
+            NotificationAttemptOutcome::Retryable { .. }
+        ));
     }
 
     #[tokio::test]
