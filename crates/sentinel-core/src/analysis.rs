@@ -927,16 +927,7 @@ mod tests {
 
     #[test]
     fn ignores_extra_independent_policy_and_detects_stale_required_filter() {
-        let target_config = TargetConfig {
-            id: "a".to_owned(),
-            name: "Resolver A".to_owned(),
-            base_url: "https://resolver-a.invalid".to_owned(),
-            username: "admin".to_owned(),
-            password_file: "/run/credentials/password".into(),
-            policy: "home".to_owned(),
-            condition_profile: "current".to_owned(),
-            allow_insecure_local_http: false,
-        };
+        let target_config = target_config();
         let policy = PolicyConfig {
             protection_enabled: true,
             upstream_mode: "load_balance".to_owned(),
@@ -1014,16 +1005,7 @@ mod tests {
 
     #[test]
     fn strict_latency_boundaries_and_protection_sustain_match_contract() {
-        let target_config = TargetConfig {
-            id: "a".to_owned(),
-            name: "Resolver A".to_owned(),
-            base_url: "https://resolver-a.invalid".to_owned(),
-            username: "admin".to_owned(),
-            password_file: "/run/credentials/password".into(),
-            policy: "home".to_owned(),
-            condition_profile: "current".to_owned(),
-            allow_insecure_local_http: false,
-        };
+        let target_config = target_config();
         let policy = PolicyConfig {
             protection_enabled: true,
             upstream_mode: "load_balance".to_owned(),
@@ -1078,6 +1060,193 @@ mod tests {
     }
 
     #[test]
+    fn a_required_rewrite_matches_after_normalization() {
+        let policy = rewrite_policy(
+            vec![required_rewrite(
+                "Service-B.Example.Invalid.",
+                "2001:0DB8::1",
+                true,
+            )],
+            true,
+        );
+
+        let evaluations = rewrite_evaluations(
+            &policy,
+            vec![observed_rewrite(
+                "service-b.example.invalid",
+                "2001:db8::1",
+                true,
+            )],
+        );
+
+        assert_eq!(evaluations.len(), 2);
+        assert!(
+            evaluations
+                .iter()
+                .all(|evaluation| evaluation.outcome == EvaluationOutcome::Clear)
+        );
+    }
+
+    #[test]
+    fn unrelated_observed_rewrites_produce_no_findings() {
+        let policy = rewrite_policy(
+            vec![required_rewrite(
+                "service-a.example.invalid",
+                "192.0.2.10",
+                true,
+            )],
+            true,
+        );
+
+        let evaluations = rewrite_evaluations(
+            &policy,
+            vec![
+                observed_rewrite("service-a.example.invalid", "192.0.2.10", true),
+                observed_rewrite("service-c.example.invalid", "192.0.2.30", false),
+                observed_rewrite("service-d.example.invalid", "192.0.2.40", true),
+            ],
+        );
+
+        assert_eq!(evaluations.len(), 2);
+        assert!(
+            evaluations
+                .iter()
+                .all(|evaluation| evaluation.outcome == EvaluationOutcome::Clear)
+        );
+    }
+
+    #[test]
+    fn a_disabled_required_rewrite_is_policy_drift() {
+        let policy = rewrite_policy(
+            vec![required_rewrite(
+                "service-a.example.invalid",
+                "192.0.2.10",
+                true,
+            )],
+            true,
+        );
+
+        let evaluations = rewrite_evaluations(
+            &policy,
+            vec![observed_rewrite(
+                "service-a.example.invalid",
+                "192.0.2.10",
+                false,
+            )],
+        );
+
+        let drift = evaluations
+            .iter()
+            .find(|evaluation| evaluation.kind == "required_rewrite_drift")
+            .expect("a required rewrite evaluation");
+        assert_eq!(drift.outcome, EvaluationOutcome::Active);
+        assert_eq!(drift.observed["enabled"], json!(false));
+    }
+
+    #[test]
+    fn a_required_rewrite_answering_differently_is_reported_as_absent() {
+        let policy = rewrite_policy(
+            vec![required_rewrite(
+                "service-a.example.invalid",
+                "192.0.2.10",
+                true,
+            )],
+            true,
+        );
+
+        let evaluations = rewrite_evaluations(
+            &policy,
+            vec![observed_rewrite(
+                "service-a.example.invalid",
+                "192.0.2.99",
+                true,
+            )],
+        );
+
+        let drift = evaluations
+            .iter()
+            .find(|evaluation| evaluation.kind == "required_rewrite_drift")
+            .expect("a required rewrite evaluation");
+        assert_eq!(drift.outcome, EvaluationOutcome::Active);
+        assert_eq!(drift.observed, json!(null));
+    }
+
+    #[test]
+    fn an_empty_rewrite_policy_only_evaluates_the_global_setting() {
+        let policy = rewrite_policy(Vec::new(), true);
+
+        let evaluations = rewrite_evaluations(
+            &policy,
+            vec![observed_rewrite(
+                "service-c.example.invalid",
+                "192.0.2.30",
+                true,
+            )],
+        );
+
+        assert_eq!(evaluations.len(), 1);
+        assert_eq!(evaluations[0].kind, "rewrite_settings_drift");
+        assert_eq!(evaluations[0].outcome, EvaluationOutcome::Clear);
+    }
+
+    #[test]
+    fn disabling_global_rewrite_handling_is_policy_drift() {
+        let policy = rewrite_policy(Vec::new(), true);
+        let mut report = target("a", 100, 10);
+        report.rewrites_enabled = Some(false);
+
+        let evaluations = super::evaluate_target(
+            &target_config(),
+            &policy,
+            &profile(),
+            &report,
+            1_800_000_000,
+        );
+
+        let settings = evaluations
+            .iter()
+            .find(|evaluation| evaluation.kind == "rewrite_settings_drift")
+            .expect("a rewrite settings evaluation");
+        assert_eq!(settings.outcome, EvaluationOutcome::Active);
+    }
+
+    #[test]
+    fn rewrite_condition_ids_ignore_declared_spelling() {
+        let observed = vec![observed_rewrite(
+            "service-a.example.invalid",
+            "192.0.2.10",
+            true,
+        )];
+        let canonical = rewrite_policy(
+            vec![required_rewrite(
+                "service-a.example.invalid",
+                "192.0.2.10",
+                true,
+            )],
+            true,
+        );
+        let respelled = rewrite_policy(
+            vec![required_rewrite(
+                "Service-A.Example.Invalid.",
+                "192.0.2.10",
+                true,
+            )],
+            true,
+        );
+
+        let left = rewrite_evaluations(&canonical, observed.clone());
+        let right = rewrite_evaluations(&respelled, observed);
+
+        let ids: fn(&[ConditionEvaluation]) -> Vec<String> = |evaluations| {
+            evaluations
+                .iter()
+                .map(|evaluation| evaluation.id.clone())
+                .collect()
+        };
+        assert_eq!(ids(&left), ids(&right));
+    }
+
+    #[test]
     fn not_evaluated_freezes_a_firing_latch() {
         let mut evaluation = ConditionEvaluation {
             id: "target:a:test".to_owned(),
@@ -1116,6 +1285,57 @@ mod tests {
         assert_eq!(state.lifecycle, before.lifecycle);
         assert_eq!(state.active_count, before.active_count);
         assert_eq!(state.alert_delivery_state, before.alert_delivery_state);
+    }
+
+    fn target_config() -> TargetConfig {
+        TargetConfig {
+            id: "a".to_owned(),
+            name: "Resolver A".to_owned(),
+            base_url: "https://resolver-a.invalid".to_owned(),
+            username: "admin".to_owned(),
+            password_file: "/run/credentials/password".into(),
+            policy: "home".to_owned(),
+            condition_profile: "current".to_owned(),
+            allow_insecure_local_http: false,
+        }
+    }
+
+    fn rewrite_policy(required: Vec<RequiredRewrite>, enabled: bool) -> PolicyConfig {
+        PolicyConfig {
+            protection_enabled: true,
+            upstream_mode: "load_balance".to_owned(),
+            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            filters: Vec::new(),
+            rewrites: RequiredRewrites { enabled, required },
+        }
+    }
+
+    fn required_rewrite(domain: &str, answer: &str, enabled: bool) -> RequiredRewrite {
+        RequiredRewrite {
+            domain: domain.to_owned(),
+            answer: answer.to_owned(),
+            enabled,
+        }
+    }
+
+    fn observed_rewrite(domain: &str, answer: &str, enabled: bool) -> RewriteObservation {
+        RewriteObservation {
+            domain: domain.to_owned(),
+            answer: answer.to_owned(),
+            enabled,
+        }
+    }
+
+    fn rewrite_evaluations(
+        policy: &PolicyConfig,
+        observed: Vec<RewriteObservation>,
+    ) -> Vec<ConditionEvaluation> {
+        let mut report = target("a", 100, 10);
+        report.rewrites = observed;
+        super::evaluate_target(&target_config(), policy, &profile(), &report, 1_800_000_000)
+            .into_iter()
+            .filter(|evaluation| evaluation.kind.contains("rewrite"))
+            .collect()
     }
 
     fn target(id: &str, queries: u64, blocked: u64) -> TargetReport {

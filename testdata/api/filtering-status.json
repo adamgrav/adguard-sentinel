@@ -1,7 +1,32 @@
 {
   "enabled": true,
   "interval": 24,
-  "filters": [],
+  "filters": [
+    {
+      "url": "https://filters.example.invalid/enabled.txt",
+      "name": "Example enabled list",
+      "last_updated": "2027-01-15T07:00:00Z",
+      "id": 1,
+      "rules_count": 54231,
+      "enabled": true
+    },
+    {
+      "url": "https://filters.example.invalid/disabled.txt",
+      "name": "Example disabled list",
+      "last_updated": null,
+      "id": 2,
+      "rules_count": 0,
+      "enabled": false
+    },
+    {
+      "url": "https://filters.example.invalid/undeclared.txt",
+      "name": "Example list outside declared policy",
+      "last_updated": "2027-01-14T08:00:00Z",
+      "id": 3,
+      "rules_count": 1204,
+      "enabled": true
+    }
+  ],
   "whitelist_filters": [],
   "user_rules": ["||discarded-private-rule.example.invalid^"]
 }

@@ -22,6 +22,7 @@ url.workspace = true
 [dev-dependencies]
 httpmock = "0.8"
 tokio.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

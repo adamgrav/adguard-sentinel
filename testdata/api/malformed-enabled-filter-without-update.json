@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "interval": 24,
+  "filters": [
+    {
+      "url": "https://filters.example.invalid/enabled.txt",
+      "name": "Example enabled list",
+      "last_updated": null,
+      "id": 1,
+      "rules_count": 54231,
+      "enabled": true
+    }
+  ],
+  "whitelist_filters": [],
+  "user_rules": []
+}

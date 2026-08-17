@@ -1,29 +1,78 @@
 # Test plan
 
-This is the target coverage matrix, not a description of current coverage. The
-suite today is 29 deterministic tests: one representative case per property
-below, biased toward the fail-closed boundaries. Rows marked *thin* have a
-representative test but not yet the full case matrix, and rows marked *absent*
-have none. `just test` is authoritative.
+`just test` is authoritative. The suite is 55 deterministic tests and contacts no
+live AdGuard Home or Pushover service.
 
-## Deterministic checks
+Rows are marked *thin* where a representative test exists but not the full case
+matrix, and *absent* where no test exists yet.
 
+## AdGuard request boundary
+
+- Every observation is one of the six allowlisted GETs, and no other path is
+  requested.
+- Unknown response fields are ignored, as ADR 0003 permits for
+  forward-compatible patch releases.
+- The legacy `upstream_mode = ""` alias normalizes to `load_balance`, an
+  explicit mode is preserved unchanged, and whitespace is not the alias.
+- Observations fail closed on a redirect, a non-success status, rejected
+  authentication, an unsupported version, a stopped server, a malformed body, a
+  missing required field, an oversized body, and a request timeout.
+- Statistics fail closed on negative processing time, a blocked count above the
+  query count, and a duplicated client identity.
+- Declared data fails closed on a duplicated upstream set, a duplicated filter
+  URL, a required filter updated in the future, an enabled required filter with
+  no update time, rewrites that collide after normalization, and an empty
+  rewrite domain.
+- A failed endpoint aborts that target's remaining requests.
+- Proxy environment inheritance is disabled unconditionally in
+  `ReqwestAdGuardClient::new`. That is a structural property rather than a test:
+  asserting it would require mutating process environment variables, which this
+  workspace's `unsafe_code = "forbid"` prevents.
+
+## Policy evaluation
+
+- Required rewrites match after domain and answer normalization, and their
+  condition identifiers do not depend on declared spelling, so latches survive a
+  configuration reformat.
+- A disabled required rewrite, a required rewrite answered differently, an
+  absent required rewrite, and a disabled global rewrite setting are each drift.
+- Filters and rewrites outside declared policy never produce a finding.
+- Required filter absence, state drift, and staleness at the configured age are
+  detected.
+- Latency comparisons are strictly greater-than at their exact boundary.
 - Configuration schema, size, cross-reference, URL, duration, and secret-file
   validation. *thin*
-- Strict API decoding for missing, malformed, negative, non-finite, duplicate,
-  and unsupported data.
-- Recorded method/path assertions for every allowlisted operation and explicit
-  query-log/mutation negative checks.
-- Behavior tests for auth cooldowns, sustain/recovery thresholds, aggregation,
-  retention, robust bounds, batching, and state evolution. *thin*
-- Policy findings for upstreams, filters, freshness, rewrites, and protection.
-  *thin*
-- SQLite creation, refusal of unsupported versions, rollback after interrupted
-  transactions, retention, and outbox outcomes.
-- Injected time for learning boundaries, clock regression, and both DST edges.
-  *thin* — one DST case exists; learning boundaries and clock regression do not.
-- CLI JSON output validated against the checked-in schema. *absent*
-- End-to-end CLI coverage of every documented exit code. *absent*
+
+## Behavior and state
+
+- Alerts latch once and resolve once. A not-evaluated outcome freezes a firing
+  latch without advancing or clearing it.
+- Aggregate thresholds are clear at equality and active above it.
+- SQLite creation with private permissions, refusal of a newer schema, rollback
+  after an interrupted transaction, live and dry-run state binding, retention at
+  the inclusive cutoff, and notification backoff before delivery.
+- Injected time covers both Amsterdam DST edges.
+- Learning-boundary and clock-regression time injection. *absent*
+- Authentication cooldown persistence and expiry. *absent*
+- Notification batching order and the rule that a behavior group advances only
+  when every member is complete. *absent*
+
+## CLI
+
+- A dry run never loads notification credentials.
+- Pushover classification for confirmed success and for retryable versus
+  permanent HTTP failures.
+- End-to-end coverage of every documented exit code. *absent*
+- Report JSON validated against the checked-in run-report schema. *absent*
+- Golden JSON and JSONL report output. *absent*
+- Migration tests per released schema version. *absent*; v1 has no predecessor.
+
+## Fixtures
+
+`testdata/PROVENANCE.md` records every fixture, its purpose, and the reference
+instant that timestamped fixtures are relative to. The golden set describes one
+healthy resolver matching the declared `home` policy in `config.example.toml`, so
+those two files are asserted against each other and cannot drift apart silently.
 
 ## Live acceptance outside this repository
 

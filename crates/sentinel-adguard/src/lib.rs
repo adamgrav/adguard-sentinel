@@ -590,35 +590,510 @@ mod tests {
     use std::time::Duration;
 
     use httpmock::Method::GET;
-    use httpmock::MockServer;
+    use httpmock::{Mock, MockServer};
     use secrecy::SecretString;
-    use sentinel_core::config::{PolicyConfig, RequiredFilter, RequiredRewrites, TargetConfig};
+    use sentinel_core::config::{PolicyConfig, TargetConfig};
+    use sentinel_core::{Config, TargetReport};
 
     use super::{
-        AdGuardError, AdGuardReadClient, DnsResponse, ReqwestAdGuardClient, StatsResponse,
-        normalize_dns, normalize_stats,
+        AdGuardError, AdGuardReadClient, DnsResponse, FilteringResponse, ReqwestAdGuardClient,
+        RewriteResponse, StatsResponse, normalize_dns, normalize_filters, normalize_rewrites,
+        normalize_stats,
     };
+
+    const NOW: i64 = 1_800_000_000;
+    const ONE_HOUR_BEFORE_NOW: i64 = 1_799_996_400;
+    const REQUIREMENT: &str = ">=0.107.78,<0.108.0";
+    const MAX_BYTES: u64 = 4_194_304;
+    const TIMEOUT_MS: u64 = 5_000;
+    const LOOKBACK_MS: u64 = 3_600_000;
+
+    const STATUS_PATH: &str = "/control/status";
+    const STATS_PATH: &str = "/control/stats";
+    const DNS_INFO_PATH: &str = "/control/dns_info";
+    const FILTERING_PATH: &str = "/control/filtering/status";
+    const REWRITE_LIST_PATH: &str = "/control/rewrite/list";
+    const REWRITE_SETTINGS_PATH: &str = "/control/rewrite/settings";
+
+    const STATUS: &str = include_str!("../../../testdata/api/status.json");
+    const STATS: &str = include_str!("../../../testdata/api/stats.json");
+    const DNS_INFO: &str = include_str!("../../../testdata/api/dns-info.json");
+    const FILTERING_STATUS: &str = include_str!("../../../testdata/api/filtering-status.json");
+    const REWRITE_LIST: &str = include_str!("../../../testdata/api/rewrite-list.json");
+    const REWRITE_SETTINGS: &str = include_str!("../../../testdata/api/rewrite-settings.json");
+
+    const DNS_INFO_EXPLICIT_MODE: &str =
+        include_str!("../../../testdata/api/dns-info-explicit-mode.json");
+    const MALFORMED_NEGATIVE_STATS: &str =
+        include_str!("../../../testdata/api/malformed-negative-stats.json");
+    const MALFORMED_BLOCKED_EXCEEDS_QUERIES: &str =
+        include_str!("../../../testdata/api/malformed-blocked-exceeds-queries.json");
+    const MALFORMED_DUPLICATE_TOP_CLIENT: &str =
+        include_str!("../../../testdata/api/malformed-duplicate-top-client.json");
+    const MALFORMED_DNS_INFO_MISSING_MODE: &str =
+        include_str!("../../../testdata/api/malformed-dns-info-missing-mode.json");
+    const MALFORMED_WHITESPACE_UPSTREAM_MODE: &str =
+        include_str!("../../../testdata/api/malformed-whitespace-upstream-mode.json");
+    const MALFORMED_DUPLICATE_REWRITES: &str =
+        include_str!("../../../testdata/api/malformed-duplicate-rewrites.json");
+    const MALFORMED_EMPTY_REWRITE_DOMAIN: &str =
+        include_str!("../../../testdata/api/malformed-empty-rewrite-domain.json");
+    const MALFORMED_FUTURE_FILTER_UPDATE: &str =
+        include_str!("../../../testdata/api/malformed-future-filter-update.json");
+    const MALFORMED_ENABLED_FILTER_WITHOUT_UPDATE: &str =
+        include_str!("../../../testdata/api/malformed-enabled-filter-without-update.json");
+
+    fn golden_bodies() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (STATUS_PATH, STATUS),
+            (STATS_PATH, STATS),
+            (DNS_INFO_PATH, DNS_INFO),
+            (FILTERING_PATH, FILTERING_STATUS),
+            (REWRITE_LIST_PATH, REWRITE_LIST),
+            (REWRITE_SETTINGS_PATH, REWRITE_SETTINGS),
+        ]
+    }
+
+    fn replacing(path: &str, body: &'static str) -> Vec<(&'static str, &'static str)> {
+        let mut bodies = golden_bodies();
+        for entry in &mut bodies {
+            if entry.0 == path {
+                entry.1 = body;
+            }
+        }
+        bodies
+    }
+
+    async fn serve<'server>(
+        server: &'server MockServer,
+        bodies: &[(&'static str, &'static str)],
+    ) -> Vec<Mock<'server>> {
+        let mut mocks = Vec::with_capacity(bodies.len());
+        for (path, body) in bodies.iter().copied() {
+            mocks.push(
+                server
+                    .mock_async(move |when, then| {
+                        when.method(GET).path(path);
+                        then.status(200)
+                            .header("content-type", "application/json")
+                            .body(body);
+                    })
+                    .await,
+            );
+        }
+        mocks
+    }
+
+    fn target(base_url: String) -> TargetConfig {
+        TargetConfig {
+            id: "resolver-a".to_owned(),
+            name: "Resolver A".to_owned(),
+            base_url,
+            username: "admin".to_owned(),
+            password_file: PathBuf::from("/run/credentials/synthetic-password"),
+            policy: "home".to_owned(),
+            condition_profile: "current".to_owned(),
+            allow_insecure_local_http: false,
+        }
+    }
+
+    fn example_policy() -> PolicyConfig {
+        let config: Config =
+            toml::from_str(include_str!("../../../config.example.toml")).expect("example config");
+        config
+            .policies
+            .get("home")
+            .cloned()
+            .expect("the example configuration declares a home policy")
+    }
+
+    fn bounded_client(timeout_ms: u64, max_response_bytes: u64) -> ReqwestAdGuardClient {
+        ReqwestAdGuardClient::new(timeout_ms, max_response_bytes, REQUIREMENT).expect("client")
+    }
+
+    async fn observe_with(
+        client: &ReqwestAdGuardClient,
+        server: &MockServer,
+    ) -> Result<TargetReport, AdGuardError> {
+        client
+            .observe(
+                &target(server.base_url()),
+                &example_policy(),
+                &SecretString::from("synthetic".to_owned()),
+                LOOKBACK_MS,
+                NOW,
+            )
+            .await
+    }
+
+    async fn observe(server: &MockServer) -> Result<TargetReport, AdGuardError> {
+        observe_with(&bounded_client(TIMEOUT_MS, MAX_BYTES), server).await
+    }
+
+    fn near(left: f64, right: f64) -> bool {
+        (left - right).abs() < 1e-9
+    }
+
+    fn filtering_of(body: &str) -> FilteringResponse {
+        serde_json::from_str(body).expect("filtering fixture parses")
+    }
+
+    fn rewrites_of(body: &str) -> Vec<RewriteResponse> {
+        serde_json::from_str(body).expect("rewrite fixture parses")
+    }
+
+    fn stats_of(body: &str) -> StatsResponse {
+        serde_json::from_str(body).expect("stats fixture parses")
+    }
+
+    fn dns_of(body: &str) -> DnsResponse {
+        serde_json::from_str(body).expect("dns fixture parses")
+    }
+
+    #[tokio::test]
+    async fn golden_observation_normalizes_every_declared_field() {
+        let server = MockServer::start_async().await;
+        let mocks = serve(&server, &golden_bodies()).await;
+
+        let report = observe(&server).await.expect("observation");
+
+        assert!(report.complete);
+        assert_eq!(report.server_version.as_deref(), Some("0.107.78"));
+        assert_eq!(report.filtering_enabled, Some(true));
+        assert_eq!(report.rewrites_enabled, Some(true));
+
+        let operational = report.operational.expect("operational observation");
+        assert!(operational.protection_enabled);
+        assert_eq!(operational.queries, 5_000);
+        assert_eq!(operational.blocked, 1_250);
+        assert!(near(operational.blocked_ratio, 0.25));
+        assert!(near(operational.average_processing_seconds, 0.0182));
+        assert!(near(operational.maximum_upstream_seconds, 0.0241));
+        assert!(near(operational.top_client_share, 0.62));
+
+        let dns = report.dns.expect("dns observation");
+        assert_eq!(dns.upstream_mode, "load_balance");
+        assert_eq!(dns.upstream_dns, example_policy().upstream_dns);
+
+        let upstreams: Vec<_> = report
+            .upstreams
+            .iter()
+            .map(|upstream| upstream.identity.as_str())
+            .collect();
+        assert_eq!(
+            upstreams,
+            [
+                "https://cloudflare-dns.com/dns-query",
+                "quic://dns10.quad9.net",
+                "tls://unfiltered.adguard-dns.com",
+            ]
+        );
+
+        let rewrites: Vec<_> = report
+            .rewrites
+            .iter()
+            .map(|rewrite| rewrite.domain.as_str())
+            .collect();
+        assert_eq!(
+            rewrites,
+            [
+                "service-a.example.invalid",
+                "service-b.example.invalid",
+                "service-c.example.invalid",
+            ]
+        );
+
+        for mock in mocks {
+            mock.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn observes_only_the_six_allowlisted_gets() {
+        let server = MockServer::start_async().await;
+        let mocks = serve(&server, &golden_bodies()).await;
+        let outside_allowlist = server
+            .mock_async(|when, then| {
+                when.path_excludes(STATUS_PATH)
+                    .path_excludes(STATS_PATH)
+                    .path_excludes(DNS_INFO_PATH)
+                    .path_excludes(FILTERING_PATH)
+                    .path_excludes(REWRITE_LIST_PATH)
+                    .path_excludes(REWRITE_SETTINGS_PATH);
+                then.status(500);
+            })
+            .await;
+
+        let report = observe(&server).await.expect("observation");
+
+        assert!(report.complete);
+        for mock in mocks {
+            mock.assert_calls_async(1).await;
+        }
+        outside_allowlist.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn unknown_response_fields_are_ignored_for_forward_compatibility() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve(
+            &server,
+            &replacing(
+                STATUS_PATH,
+                r#"{"protection_enabled":true,"running":true,"version":"v0.107.78","added_by_a_later_patch_release":42}"#,
+            ),
+        )
+        .await;
+
+        let report = observe(&server).await.expect("observation");
+
+        assert!(report.complete);
+    }
+
+    #[tokio::test]
+    async fn redirect_responses_are_not_followed() {
+        let server = MockServer::start_async().await;
+        let redirect = server
+            .mock_async(|when, then| {
+                when.method(GET).path(STATUS_PATH);
+                then.status(302).header("location", "/control/elsewhere");
+            })
+            .await;
+        let elsewhere = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/control/elsewhere");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(STATUS);
+            })
+            .await;
+
+        let error = observe(&server)
+            .await
+            .expect_err("a redirect must not be followed");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API request failed at GET /control/status: HTTP 302"
+        );
+        redirect.assert_calls_async(1).await;
+        elsewhere.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn a_malformed_body_is_an_invalid_response() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve(
+            &server,
+            &replacing(STATUS_PATH, r#"{"protection_enabled":true,"running":"#),
+        )
+        .await;
+
+        let error = observe(&server)
+            .await
+            .expect_err("a malformed body must fail closed");
+
+        assert!(matches!(
+            error,
+            AdGuardError::InvalidResponse {
+                endpoint: "GET /control/status",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stopped_server_is_an_invalid_response() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve(
+            &server,
+            &replacing(
+                STATUS_PATH,
+                r#"{"protection_enabled":true,"running":false,"version":"v0.107.78"}"#,
+            ),
+        )
+        .await;
+
+        let error = observe(&server)
+            .await
+            .expect_err("a stopped server must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/status: running must be true for a complete observation"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_required_data_fails_closed_at_its_own_endpoint() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve(
+            &server,
+            &replacing(DNS_INFO_PATH, MALFORMED_DNS_INFO_MISSING_MODE),
+        )
+        .await;
+
+        let error = observe(&server)
+            .await
+            .expect_err("a missing required field must fail closed");
+
+        assert!(matches!(
+            error,
+            AdGuardError::InvalidResponse {
+                endpoint: "GET /control/dns_info",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_endpoint_stops_the_remaining_requests() {
+        let server = MockServer::start_async().await;
+        let status = serve(&server, &[(STATUS_PATH, STATUS)]).await;
+        let broken_stats = server
+            .mock_async(|when, then| {
+                when.method(GET).path(STATS_PATH);
+                then.status(503);
+            })
+            .await;
+        let later = serve(
+            &server,
+            &[
+                (DNS_INFO_PATH, DNS_INFO),
+                (FILTERING_PATH, FILTERING_STATUS),
+                (REWRITE_LIST_PATH, REWRITE_LIST),
+                (REWRITE_SETTINGS_PATH, REWRITE_SETTINGS),
+            ],
+        )
+        .await;
+
+        let error = observe(&server)
+            .await
+            .expect_err("a failed endpoint must abort the observation");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API request failed at GET /control/stats: HTTP 503"
+        );
+        for mock in status {
+            mock.assert_calls_async(1).await;
+        }
+        broken_stats.assert_calls_async(1).await;
+        for mock in later {
+            mock.assert_calls_async(0).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_is_an_incomplete_unavailable_observation() {
+        let server = MockServer::start_async().await;
+        let _status = server
+            .mock_async(|when, then| {
+                when.method(GET).path(STATUS_PATH);
+                then.status(200)
+                    .delay(Duration::from_millis(100))
+                    .header("content-type", "application/json")
+                    .body(STATUS);
+            })
+            .await;
+
+        let error = observe_with(&bounded_client(10, MAX_BYTES), &server)
+            .await
+            .expect_err("must time out");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API request failed at GET /control/status: request timed out"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_a_response_over_the_configured_limit() {
+        let server = MockServer::start_async().await;
+        let status = serve(&server, &[(STATUS_PATH, STATUS)]).await;
+
+        let error = observe_with(&bounded_client(TIMEOUT_MS, 16), &server)
+            .await
+            .expect_err("must reject oversized body");
+
+        assert!(matches!(error, AdGuardError::ResponseTooLarge { .. }));
+        for mock in status {
+            mock.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn classifies_rejected_authentication_without_requesting_other_endpoints() {
+        for code in [401_u16, 403] {
+            let server = MockServer::start_async().await;
+            let rejected = server
+                .mock_async(move |when, then| {
+                    when.method(GET).path(STATUS_PATH);
+                    then.status(code);
+                })
+                .await;
+            let statistics = serve(&server, &[(STATS_PATH, STATS)]).await;
+
+            let error = observe(&server)
+                .await
+                .expect_err("must reject authentication");
+
+            assert!(matches!(error, AdGuardError::AuthenticationRejected));
+            rejected.assert_calls_async(1).await;
+            for mock in statistics {
+                mock.assert_calls_async(0).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_an_unsupported_server_version_before_other_requests() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve(
+            &server,
+            &replacing(
+                STATUS_PATH,
+                r#"{"protection_enabled":true,"running":true,"version":"v0.108.0"}"#,
+            ),
+        )
+        .await;
+        let stats = serve(&server, &[(STATS_PATH, STATS)]).await;
+
+        let error = observe(&server)
+            .await
+            .expect_err("unsupported version must fail");
+
+        assert!(matches!(error, AdGuardError::UnsupportedVersion { .. }));
+        for mock in stats {
+            mock.assert_calls_async(0).await;
+        }
+    }
 
     #[test]
     fn normalizes_legacy_empty_upstream_mode_to_load_balance() {
-        let observation = normalize_dns(DnsResponse {
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
-            upstream_mode: String::new(),
-        })
-        .expect("legacy empty mode is load_balance");
+        let observation =
+            normalize_dns(dns_of(DNS_INFO)).expect("the legacy empty mode is load_balance");
 
         assert_eq!(observation.upstream_mode, "load_balance");
     }
 
     #[test]
     fn preserves_explicit_load_balance_upstream_mode() {
-        let observation = normalize_dns(DnsResponse {
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
-            upstream_mode: "load_balance".to_owned(),
-        })
-        .expect("explicit load_balance mode is valid");
+        let observation = normalize_dns(dns_of(DNS_INFO_EXPLICIT_MODE))
+            .expect("an explicit load_balance mode is valid");
 
         assert_eq!(observation.upstream_mode, "load_balance");
+    }
+
+    #[test]
+    fn rejects_a_whitespace_only_upstream_mode() {
+        let error = normalize_dns(dns_of(MALFORMED_WHITESPACE_UPSTREAM_MODE))
+            .expect_err("whitespace is not the legacy empty-string alias");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/dns_info: upstream mode must not contain only whitespace"
+        );
     }
 
     #[test]
@@ -629,285 +1104,60 @@ mod tests {
         })
         .expect_err("an empty upstream set must remain invalid");
 
-        assert!(matches!(error, AdGuardError::InvalidResponse { .. }));
         assert_eq!(
             error.to_string(),
             "AdGuard API response was invalid at GET /control/dns_info: upstream set must be nonempty"
         );
     }
 
-    #[tokio::test]
-    async fn observes_only_the_six_allowlisted_gets() {
-        let server = MockServer::start_async().await;
-        let fixtures = [
-            (
-                "/control/status",
-                include_str!("../../../testdata/api/status.json"),
-            ),
-            (
-                "/control/stats",
-                include_str!("../../../testdata/api/stats.json"),
-            ),
-            (
-                "/control/dns_info",
-                include_str!("../../../testdata/api/dns-info.json"),
-            ),
-            (
-                "/control/filtering/status",
-                include_str!("../../../testdata/api/filtering-status.json"),
-            ),
-            (
-                "/control/rewrite/list",
-                include_str!("../../../testdata/api/rewrite-list.json"),
-            ),
-            (
-                "/control/rewrite/settings",
-                include_str!("../../../testdata/api/rewrite-settings.json"),
-            ),
-        ];
-        let mut mocks = Vec::new();
-        for (path, body) in fixtures {
-            let builder = server
-                .mock_async(|when, then| {
-                    when.method(GET).path(path);
-                    then.status(200)
-                        .header("content-type", "application/json")
-                        .body(body);
-                })
-                .await;
-            mocks.push(builder);
-        }
-        let target = TargetConfig {
-            id: "resolver-a".to_owned(),
-            name: "Resolver A".to_owned(),
-            base_url: server.base_url(),
-            username: "admin".to_owned(),
-            password_file: PathBuf::from("/tmp/synthetic-password"),
-            policy: "test".to_owned(),
-            condition_profile: "test".to_owned(),
-            allow_insecure_local_http: false,
-        };
-        let policy = PolicyConfig {
-            protection_enabled: true,
+    #[test]
+    fn rejects_a_duplicated_upstream_set() {
+        let error = normalize_dns(DnsResponse {
+            upstream_dns: vec![
+                "tls://resolver.invalid".to_owned(),
+                "tls://resolver.invalid".to_owned(),
+            ],
             upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
-            filters: Vec::<RequiredFilter>::new(),
-            rewrites: RequiredRewrites {
-                enabled: true,
-                required: Vec::new(),
-            },
-        };
-        let client =
-            ReqwestAdGuardClient::new(5_000, 4_194_304, ">=0.107.78,<0.108.0").expect("client");
-        let report = client
-            .observe(
-                &target,
-                &policy,
-                &SecretString::from("synthetic".to_owned()),
-                3_600_000,
-                1_800_000_000,
-            )
-            .await
-            .expect("observation");
-        assert!(report.complete);
-        for mock in mocks {
-            mock.assert_async().await;
-        }
+        })
+        .expect_err("a duplicated upstream set must be invalid");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/dns_info: upstream set contains empty or duplicate values"
+        );
     }
 
     #[test]
     fn rejects_negative_latency_instead_of_defaulting_to_healthy() {
-        let statistics: StatsResponse = serde_json::from_str(include_str!(
-            "../../../testdata/api/malformed-negative-stats.json"
-        ))
-        .expect("syntactically valid fixture");
-        let error = normalize_stats(true, &statistics).expect_err("negative latency must fail");
-        assert!(matches!(error, AdGuardError::InvalidResponse { .. }));
+        let error = normalize_stats(true, &stats_of(MALFORMED_NEGATIVE_STATS))
+            .expect_err("negative latency must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/stats: avg_processing_time must be finite and nonnegative"
+        );
     }
 
-    #[tokio::test]
-    async fn timeout_is_an_incomplete_unavailable_observation() {
-        let server = MockServer::start_async().await;
-        let _status = server
-            .mock_async(|when, then| {
-                when.method(GET).path("/control/status");
-                then.status(200)
-                    .delay(Duration::from_millis(100))
-                    .header("content-type", "application/json")
-                    .body(include_str!("../../../testdata/api/status.json"));
-            })
-            .await;
-        let target = TargetConfig {
-            id: "resolver-a".to_owned(),
-            name: "Resolver A".to_owned(),
-            base_url: server.base_url(),
-            username: "admin".to_owned(),
-            password_file: PathBuf::from("/tmp/synthetic-password"),
-            policy: "test".to_owned(),
-            condition_profile: "test".to_owned(),
-            allow_insecure_local_http: false,
-        };
-        let policy = PolicyConfig {
-            protection_enabled: true,
-            upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
-            filters: Vec::new(),
-            rewrites: RequiredRewrites {
-                enabled: true,
-                required: Vec::new(),
-            },
-        };
-        let client =
-            ReqwestAdGuardClient::new(10, 4_194_304, ">=0.107.78,<0.108.0").expect("client");
-        let error = client
-            .observe(
-                &target,
-                &policy,
-                &SecretString::from("synthetic".to_owned()),
-                3_600_000,
-                1_800_000_000,
-            )
-            .await
-            .expect_err("must time out");
-        assert!(matches!(error, AdGuardError::Unavailable { .. }));
+    #[test]
+    fn rejects_a_blocked_count_above_the_query_count() {
+        let error = normalize_stats(true, &stats_of(MALFORMED_BLOCKED_EXCEEDS_QUERIES))
+            .expect_err("an impossible blocked count must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/stats: num_blocked_filtering exceeds num_dns_queries"
+        );
     }
 
-    #[tokio::test]
-    async fn rejects_a_response_over_the_configured_limit() {
-        let server = MockServer::start_async().await;
-        let status = server
-            .mock_async(|when, then| {
-                when.method(GET).path("/control/status");
-                then.status(200)
-                    .header("content-type", "application/json")
-                    .body(include_str!("../../../testdata/api/status.json"));
-            })
-            .await;
-        let target = TargetConfig {
-            id: "resolver-a".to_owned(),
-            name: "Resolver A".to_owned(),
-            base_url: server.base_url(),
-            username: "admin".to_owned(),
-            password_file: PathBuf::from("/tmp/synthetic-password"),
-            policy: "test".to_owned(),
-            condition_profile: "test".to_owned(),
-            allow_insecure_local_http: false,
-        };
-        let policy = PolicyConfig {
-            protection_enabled: true,
-            upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
-            filters: Vec::new(),
-            rewrites: RequiredRewrites {
-                enabled: true,
-                required: Vec::new(),
-            },
-        };
-        let client = ReqwestAdGuardClient::new(5_000, 16, ">=0.107.78,<0.108.0").expect("client");
-        let error = client
-            .observe(
-                &target,
-                &policy,
-                &SecretString::from("synthetic".to_owned()),
-                3_600_000,
-                1_800_000_000,
-            )
-            .await
-            .expect_err("must reject oversized body");
-        assert!(matches!(error, AdGuardError::ResponseTooLarge { .. }));
-        status.assert_async().await;
-    }
+    #[test]
+    fn rejects_a_duplicated_top_client_identity() {
+        let error = normalize_stats(true, &stats_of(MALFORMED_DUPLICATE_TOP_CLIENT))
+            .expect_err("a duplicated client identity must fail");
 
-    #[tokio::test]
-    async fn classifies_unauthorized_without_requesting_other_endpoints() {
-        let server = MockServer::start_async().await;
-        let status = server
-            .mock_async(|when, then| {
-                when.method(GET).path("/control/status");
-                then.status(401);
-            })
-            .await;
-        let target = TargetConfig {
-            id: "resolver-a".to_owned(),
-            name: "Resolver A".to_owned(),
-            base_url: server.base_url(),
-            username: "admin".to_owned(),
-            password_file: PathBuf::from("/tmp/synthetic-password"),
-            policy: "test".to_owned(),
-            condition_profile: "test".to_owned(),
-            allow_insecure_local_http: false,
-        };
-        let policy = PolicyConfig {
-            protection_enabled: true,
-            upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
-            filters: Vec::new(),
-            rewrites: RequiredRewrites {
-                enabled: true,
-                required: Vec::new(),
-            },
-        };
-        let client =
-            ReqwestAdGuardClient::new(5_000, 4_194_304, ">=0.107.78,<0.108.0").expect("client");
-        let error = client
-            .observe(
-                &target,
-                &policy,
-                &SecretString::from("synthetic".to_owned()),
-                3_600_000,
-                1_800_000_000,
-            )
-            .await
-            .expect_err("must reject authentication");
-        assert!(matches!(error, AdGuardError::AuthenticationRejected));
-        status.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn rejects_an_unsupported_server_version_before_other_requests() {
-        let server = MockServer::start_async().await;
-        let status = server
-            .mock_async(|when, then| {
-                when.method(GET).path("/control/status");
-                then.status(200)
-                    .header("content-type", "application/json")
-                    .body(r#"{"protection_enabled":true,"running":true,"version":"v0.108.0"}"#);
-            })
-            .await;
-        let target = TargetConfig {
-            id: "resolver-a".to_owned(),
-            name: "Resolver A".to_owned(),
-            base_url: server.base_url(),
-            username: "admin".to_owned(),
-            password_file: PathBuf::from("/tmp/synthetic-password"),
-            policy: "test".to_owned(),
-            condition_profile: "test".to_owned(),
-            allow_insecure_local_http: false,
-        };
-        let policy = PolicyConfig {
-            protection_enabled: true,
-            upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
-            filters: Vec::new(),
-            rewrites: RequiredRewrites {
-                enabled: true,
-                required: Vec::new(),
-            },
-        };
-        let client =
-            ReqwestAdGuardClient::new(5_000, 4_194_304, ">=0.107.78,<0.108.0").expect("client");
-        let error = client
-            .observe(
-                &target,
-                &policy,
-                &SecretString::from("synthetic".to_owned()),
-                3_600_000,
-                1_800_000_000,
-            )
-            .await
-            .expect_err("unsupported version must fail");
-        assert!(matches!(error, AdGuardError::UnsupportedVersion { .. }));
-        status.assert_async().await;
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/stats: top_clients contains invalid or duplicate data"
+        );
     }
 
     #[test]
@@ -919,6 +1169,149 @@ mod tests {
                 r#"{"num_dns_queries":"100","num_blocked_filtering":20,"avg_processing_time":0.01,"top_upstreams_avg_time":[],"top_clients":[]}"#,
             )
             .is_err()
+        );
+        assert!(serde_json::from_str::<DnsResponse>(MALFORMED_DNS_INFO_MISSING_MODE).is_err());
+    }
+
+    #[test]
+    fn normalizes_and_sorts_rewrite_entries() {
+        let observed = normalize_rewrites(rewrites_of(REWRITE_LIST)).expect("golden rewrites");
+
+        let rendered: Vec<_> = observed
+            .iter()
+            .map(|rewrite| {
+                (
+                    rewrite.domain.as_str(),
+                    rewrite.answer.as_str(),
+                    rewrite.enabled,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            [
+                ("service-a.example.invalid", "192.0.2.10", true),
+                ("service-b.example.invalid", "2001:db8::1", true),
+                ("service-c.example.invalid", "192.0.2.30", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_rewrites_that_collide_after_normalization() {
+        let error = normalize_rewrites(rewrites_of(MALFORMED_DUPLICATE_REWRITES))
+            .expect_err("normalized duplicates must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/rewrite/list: rewrite list contains empty or duplicate normalized entries"
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_rewrite_domain() {
+        let error = normalize_rewrites(rewrites_of(MALFORMED_EMPTY_REWRITE_DOMAIN))
+            .expect_err("an empty rewrite domain must fail");
+
+        assert!(matches!(
+            error,
+            AdGuardError::InvalidResponse {
+                endpoint: "GET /control/rewrite/list",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accepts_an_empty_rewrite_list() {
+        assert!(
+            normalize_rewrites(rewrites_of("[]"))
+                .expect("an empty list is valid")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retains_only_filters_named_by_declared_policy() {
+        let observed = normalize_filters(
+            filtering_of(FILTERING_STATUS).filters,
+            &example_policy(),
+            NOW,
+        )
+        .expect("golden filters");
+
+        let rendered: Vec<_> = observed
+            .iter()
+            .map(|filter| {
+                (
+                    filter.url.as_str(),
+                    filter.enabled,
+                    filter.last_updated_unix_seconds,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            [
+                (
+                    "https://filters.example.invalid/disabled.txt",
+                    false,
+                    None::<i64>,
+                ),
+                (
+                    "https://filters.example.invalid/enabled.txt",
+                    true,
+                    Some(ONE_HOUR_BEFORE_NOW),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_a_required_filter_updated_in_the_future() {
+        let error = normalize_filters(
+            filtering_of(MALFORMED_FUTURE_FILTER_UPDATE).filters,
+            &example_policy(),
+            NOW,
+        )
+        .expect_err("a future update time must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/filtering/status: required filter last_updated is in the future"
+        );
+    }
+
+    #[test]
+    fn rejects_an_enabled_required_filter_without_an_update_time() {
+        let error = normalize_filters(
+            filtering_of(MALFORMED_ENABLED_FILTER_WITHOUT_UPDATE).filters,
+            &example_policy(),
+            NOW,
+        )
+        .expect_err("an enabled required filter needs an update time");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/filtering/status: enabled required filter has no last_updated value"
+        );
+    }
+
+    #[test]
+    fn rejects_a_duplicated_filter_url() {
+        let response = filtering_of(
+            r#"{"enabled":true,"filters":[
+                {"url":"https://filters.example.invalid/enabled.txt","last_updated":"2027-01-15T07:00:00Z","id":1,"rules_count":1,"enabled":true},
+                {"url":"https://filters.example.invalid/enabled.txt","last_updated":"2027-01-15T07:00:00Z","id":2,"rules_count":1,"enabled":true}
+            ]}"#,
+        );
+
+        let error = normalize_filters(response.filters, &example_policy(), NOW)
+            .expect_err("a duplicated filter URL must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/filtering/status: filter list contains an empty or duplicate URL"
         );
     }
 }
