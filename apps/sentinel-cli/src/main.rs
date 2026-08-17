@@ -735,7 +735,8 @@ mod tests {
     use httpmock::{Mock, MockServer};
     use jiff::Timestamp;
     use sentinel_core::{
-        Config, FixedClock, NotificationStatus, OutboxMessage, RunReport, RunStatus, TransitionKind,
+        Config, FixedClock, NotificationStatus, OutboxMessage, RunReport, RunStatus, TargetStatus,
+        TransitionKind,
     };
     use sentinel_store::{NotificationAttemptOutcome, StateStore};
     use tempfile::{TempDir, tempdir};
@@ -947,6 +948,24 @@ allow_insecure_local_http = false
             &at(REFERENCE_INSTANT),
         )
         .await
+    }
+
+    async fn run_at(harness: &Harness, instant: &str) -> Result<u8, CommandError> {
+        check(
+            &harness.config_path,
+            false,
+            OutputFormat::Json,
+            FailOn::Never,
+            &at(instant),
+        )
+        .await
+    }
+
+    fn runtime_state(harness: &Harness) -> Option<sentinel_core::TargetRuntimeState> {
+        StateStore::open_existing(&harness.state)
+            .expect("state")
+            .target_runtime_state("resolver-a")
+            .expect("runtime state")
     }
 
     async fn run_notifying(
@@ -1439,6 +1458,71 @@ allow_insecure_local_http = false
         }
         assert!(!serialized.contains("Basic "));
         assert!(serialized.contains("pushover_permanent_rejection"));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_password_pauses_and_later_resumes_observation() {
+        let server = MockServer::start_async().await;
+        let unauthorized = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/control/status");
+                then.status(401);
+            })
+            .await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+
+        assert_eq!(
+            run_at(&harness, "2027-01-15T08:00:00Z")
+                .await
+                .expect("rejected run"),
+            3
+        );
+        assert_eq!(
+            latest_report(&harness).targets[0].status,
+            TargetStatus::AuthenticationRejected
+        );
+        assert_eq!(
+            runtime_state(&harness)
+                .expect("a cooldown")
+                .auth_retry_after,
+            Some(1_800_000_900)
+        );
+        unauthorized.assert_calls_async(1).await;
+
+        assert_eq!(
+            run_at(&harness, "2027-01-15T08:05:00Z")
+                .await
+                .expect("cooldown run"),
+            3
+        );
+        assert_eq!(
+            latest_report(&harness).targets[0].status,
+            TargetStatus::AuthenticationCooldown
+        );
+        unauthorized.assert_calls_async(1).await;
+
+        unauthorized.delete_async().await;
+        let _accepted = serve_golden(&server).await;
+
+        assert_eq!(
+            run_at(&harness, "2027-01-15T08:20:00Z")
+                .await
+                .expect("resumed run"),
+            0
+        );
+        assert_eq!(
+            latest_report(&harness).targets[0].status,
+            TargetStatus::Complete
+        );
+        assert!(
+            runtime_state(&harness).is_none(),
+            "a complete observation must clear the cooldown"
+        );
     }
 
     #[tokio::test]

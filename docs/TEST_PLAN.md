@@ -1,6 +1,6 @@
 # Test plan
 
-`just test` is authoritative. The suite is 74 deterministic tests and contacts no
+`just test` is authoritative. The suite is 75 deterministic tests and contacts no
 live AdGuard Home or Pushover service.
 
 Rows are marked *thin* where a representative test exists but not the full case
@@ -55,7 +55,9 @@ matrix, and *absent* where no test exists yet.
 - A regressed wall clock fails before the run is recorded, leaving the earlier
   run as the only persisted one.
 - Learning-boundary time injection. *absent*
-- Authentication cooldown persistence and expiry. *absent*
+- A rejected password records a cooldown, the next run inside it makes no AdGuard
+  request at all, a later run resumes observation, and a complete observation
+  clears the cooldown rather than letting it merely expire.
 - Notification batching order and the rule that a behavior group advances only
   when every member is complete. *absent*
 
