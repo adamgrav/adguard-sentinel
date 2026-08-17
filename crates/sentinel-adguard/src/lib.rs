@@ -438,10 +438,23 @@ fn normalize_upstreams(
 }
 
 fn normalize_dns(dns: DnsResponse) -> Result<DnsObservation, AdGuardError> {
-    if dns.upstream_mode.trim().is_empty() || dns.upstream_dns.is_empty() {
+    let upstream_mode = if dns.upstream_mode.is_empty() {
+        // AdGuard Home 0.107.78 serializes its load-balancing mode as the
+        // legacy empty-string API value.  Normalize that documented alias at
+        // the request boundary so policy evaluation sees the canonical mode.
+        "load_balance".to_owned()
+    } else if dns.upstream_mode.trim().is_empty() {
         return Err(AdGuardError::InvalidResponse {
             endpoint: Endpoint::DnsInfo.label(),
-            detail: "upstream mode and set must be nonempty".to_owned(),
+            detail: "upstream mode must not contain only whitespace".to_owned(),
+        });
+    } else {
+        dns.upstream_mode
+    };
+    if dns.upstream_dns.is_empty() {
+        return Err(AdGuardError::InvalidResponse {
+            endpoint: Endpoint::DnsInfo.label(),
+            detail: "upstream set must be nonempty".to_owned(),
         });
     }
     let unique: BTreeSet<_> = dns.upstream_dns.iter().collect();
@@ -454,7 +467,7 @@ fn normalize_dns(dns: DnsResponse) -> Result<DnsObservation, AdGuardError> {
         });
     }
     Ok(DnsObservation {
-        upstream_mode: dns.upstream_mode,
+        upstream_mode,
         upstream_dns: dns.upstream_dns,
     })
 }
@@ -582,8 +595,46 @@ mod tests {
     use sentinel_core::config::{PolicyConfig, RequiredFilter, RequiredRewrites, TargetConfig};
 
     use super::{
-        AdGuardError, AdGuardReadClient, ReqwestAdGuardClient, StatsResponse, normalize_stats,
+        AdGuardError, AdGuardReadClient, DnsResponse, ReqwestAdGuardClient, StatsResponse,
+        normalize_dns, normalize_stats,
     };
+
+    #[test]
+    fn normalizes_legacy_empty_upstream_mode_to_load_balance() {
+        let observation = normalize_dns(DnsResponse {
+            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            upstream_mode: String::new(),
+        })
+        .expect("legacy empty mode is load_balance");
+
+        assert_eq!(observation.upstream_mode, "load_balance");
+    }
+
+    #[test]
+    fn preserves_explicit_load_balance_upstream_mode() {
+        let observation = normalize_dns(DnsResponse {
+            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            upstream_mode: "load_balance".to_owned(),
+        })
+        .expect("explicit load_balance mode is valid");
+
+        assert_eq!(observation.upstream_mode, "load_balance");
+    }
+
+    #[test]
+    fn rejects_empty_upstream_set_with_legacy_mode() {
+        let error = normalize_dns(DnsResponse {
+            upstream_dns: Vec::new(),
+            upstream_mode: String::new(),
+        })
+        .expect_err("an empty upstream set must remain invalid");
+
+        assert!(matches!(error, AdGuardError::InvalidResponse { .. }));
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/dns_info: upstream set must be nonempty"
+        );
+    }
 
     #[tokio::test]
     async fn observes_only_the_six_allowlisted_gets() {
