@@ -25,8 +25,9 @@ This register must be refreshed when either lock changes.
 | uuid | opaque run and outbox identifiers | runtime | MIT OR Apache-2.0 |
 
 Nix supplies the exact compiler, Cargo, Just, formatter, and cargo-deny. SQLite
-is built through rusqlite's bundled feature. A generated
-transitive notice report remains required before public release.
+is built through rusqlite's bundled feature. Because the binary statically links
+these crates, anyone redistributing a build must carry the license notices of
+these dependencies and their transitive dependencies.
 
 `webpki-roots`, reached through reqwest/rustls, includes Mozilla's public root
 certificate data under CDLA-Permissive-2.0. This is accepted for runtime TLS

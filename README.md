@@ -4,10 +4,9 @@ AdGuard Sentinel is a read-only operational and declared-policy monitor for
 independent AdGuard Home resolvers. It has no AdGuard mutation API and never
 retrieves query logs.
 
-The project is pre-release. Read [the product contract](docs/PRODUCT.md),
-[MVP scope](docs/MVP_SCOPE.md), [behavior contract](docs/BEHAVIOR.md),
-[architecture](docs/ARCHITECTURE.md), and [deployment guide](docs/DEPLOYMENT.md)
-before using it.
+Read [the product contract](docs/PRODUCT.md), [MVP scope](docs/MVP_SCOPE.md),
+[behavior contract](docs/BEHAVIOR.md), [architecture](docs/ARCHITECTURE.md), and
+[deployment guide](docs/DEPLOYMENT.md) before using it.
 
 ## Development
 
@@ -43,5 +42,7 @@ keeps ordinary findings separate from execution health.
 
 ## License
 
-Provisionally licensed under either Apache-2.0 or MIT, at your option. A final
-dependency and notice review is required before public release.
+Licensed under either [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at
+your option. Third-party dependency licenses are registered in
+[`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) and enforced by
+`cargo deny check licenses`.

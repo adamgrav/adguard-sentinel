@@ -3,19 +3,6 @@
 AdGuard Sentinel runs on one monitor host and observes every configured resolver
 over the read-only API. Target resolver hosts do not need the binary installed.
 
-## Source delivery before publication
-
-A private Git remote is the most convenient iteration path. Clone it normally
-on the monitor host and build from that local checkout. This avoids putting
-private-repository credentials into Nix flake evaluation. An `rsync` or Git
-bundle transfer is also acceptable for the first smoke test.
-
-Never commit credentials. Rewriting a private repository before publication is
-reasonable for presentation, but old clones, tags, pull-request references,
-workflow logs, or provider caches may retain old object identifiers. Treat a
-private repository as non-public, not as a secret store. For the cleanest public
-history, create a fresh public repository from the reviewed final tree.
-
 ## Host build
 
 From the monitor host checkout:
@@ -68,13 +55,15 @@ notification delivery requires a separately authorized test route.
 
 ## NixOS service acceptance
 
-The host integration should use a DynamicUser, a `0700` StateDirectory,
-systemd credentials, the existing hardening posture, and a five-minute oneshot
-timer. Start the service manually before enabling the timer. Require twelve
-consecutive successful timer runs, one service restart, growing SQLite history,
-clean journald output, and successful external job-health events.
+The host integration should use a `DynamicUser`, a `0700` `StateDirectory`,
+secrets supplied through `LoadCredential`, a restrictive sandbox, and a oneshot
+service driven by a persistent timer. Start the service manually before enabling
+the timer. Require twelve consecutive successful timer runs, one service
+restart, growing SQLite history, clean journald output, and successful external
+job-health events if a job-health monitor is configured.
 
-Keep the previous monitor definition and state available but disabled for the
-initial rollback window. Do not run two notification-producing monitors at the
-same time. Rollback stops the Sentinel timer, restores the previous declarative
-unit selection and job-health target, and verifies one successful run.
+If Sentinel replaces an existing monitor, keep that monitor's definition and
+state available but disabled for an initial rollback window, and never run two
+notification-producing monitors against the same targets at the same time.
+Rollback stops the Sentinel timer, restores the previous declarative unit
+selection and job-health target, and verifies one successful run.

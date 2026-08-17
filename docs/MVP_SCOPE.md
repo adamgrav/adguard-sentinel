@@ -15,16 +15,16 @@
 - Versioned config and run-report schemas.
 - Synthetic API fixtures and deterministic behavior, transport, state, and CLI
   tests.
-- A Nix package, checks, and development shell. The release claim is limited to
-  x86_64 Linux only after that package is actually built there.
+- A Nix package, checks, and development shell. A supported-platform claim is
+  made only for a system on which the package has actually been built.
 
 ## Excluded
 
 - A web UI, daemon, Prometheus, HTML output, other notification sinks,
-  containers, signed binaries, Windows, or public release.
-- A reusable NixOS module. Host integration stays in the dotfiles repository.
+  containers, signed binaries, prebuilt release artifacts, or Windows.
+- A reusable NixOS service module. Host integration — systemd units,
+  credentials, timers, and hardening — is owned by the operator's own
+  configuration.
 - DNS canary probes, query logs, top domains, client identities, caches,
   sessions, persistent clients, or undeclared rewrites.
 - Every AdGuard `POST`, `PUT`, `PATCH`, and `DELETE` operation.
-- Live AdGuard access, real Pushover messages, dotfiles changes, or NixOS
-  deployment during MVP implementation.

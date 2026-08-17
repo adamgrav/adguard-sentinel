@@ -31,7 +31,8 @@ notifications.
 
 1. Validate version-1 TOML without network access.
 2. Run a dry observation and inspect human or JSON output.
-3. Install the recurring systemd oneshot outside this repository.
+3. Install a recurring systemd oneshot on the monitor host. This repository
+   ships a binary package, not a service module.
 4. Receive one alert after a sustained condition.
 5. Receive one quiet resolution only after a confirmed delivered alert.
 6. Inspect bounded resolver, upstream, policy, finding, and notification history.

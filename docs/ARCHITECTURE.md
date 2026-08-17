@@ -43,4 +43,5 @@ injectable. All project crates forbid unsafe Rust.
 Fixture and mock-server checks prove deterministic domain and transport
 properties. Nix evaluation proves only evaluability. Package builds prove only
 the target actually built. None proves a deployed timer, live credentials,
-network reachability, Healthchecks integration, or production notification.
+network reachability, external job-health integration, or production
+notification.

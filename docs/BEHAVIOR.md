@@ -1,7 +1,7 @@
 # Behavior contract
 
-The following rules are product behavior, independent of any previous
-implementation:
+The following rules are the product's behavior contract. Changing any of them is
+a behavior change that must be reflected here and in the run-report schema:
 
 - Authentication rejection alerts after one observation and pauses that target
   for 900 seconds.
