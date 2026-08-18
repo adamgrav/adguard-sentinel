@@ -7,7 +7,7 @@ Notable changes to AdGuard Sentinel. The format follows
 
 Nothing yet.
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-08-18
 
 The first release. Everything below is new.
 
