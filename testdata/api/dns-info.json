@@ -1,0 +1,27 @@
+{
+  "upstream_dns": [
+    "quic://dns10.quad9.net",
+    "tls://unfiltered.adguard-dns.com",
+    "https://cloudflare-dns.com/dns-query"
+  ],
+  "upstream_dns_file": "",
+  "bootstrap_dns": ["192.0.2.9"],
+  "fallback_dns": [],
+  "upstream_mode": "",
+  "protection_enabled": true,
+  "ratelimit": 20,
+  "blocking_mode": "default",
+  "blocking_ipv4": "",
+  "blocking_ipv6": "",
+  "blocked_response_ttl": 10,
+  "edns_cs_enabled": false,
+  "dnssec_enabled": false,
+  "disable_ipv6": false,
+  "cache_size": 4194304,
+  "cache_ttl_min": 0,
+  "cache_ttl_max": 0,
+  "cache_optimistic": false,
+  "resolve_clients": true,
+  "use_private_ptr_resolvers": true,
+  "local_ptr_upstreams": []
+}

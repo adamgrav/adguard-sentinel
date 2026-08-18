@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets CI be re-run on demand from the Actions tab or `gh workflow run ci.yml`,
+  # without needing a commit to trigger it.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Reproducible checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        with:
+          enable_kvm: false
+          install_url: https://releases.nixos.org/nix/nix-2.35.1/install
+          set_as_trusted_user: false
+
+      - name: Check flake outputs
+        run: nix flake check
+
+      - name: Run aggregate development checks
+        run: nix develop -c just check
+
+  source-build:
+    name: Source build (Ubuntu, rustup)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      # rust-toolchain.toml pins the channel, profile, and components, so any
+      # cargo invocation inside the checkout makes rustup fetch exactly that
+      # toolchain. This avoids a third-party toolchain action.
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+          cc --version
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run unit, integration, and documentation tests
+        run: cargo test --locked --workspace --all-features
+
+      - name: Build the release binary
+        run: cargo build --locked --release
+
+      - name: Confirm the release binary has no system SQLite, TLS, or tzdata dependency
+        run: |
+          binary=target/release/adguard-sentinel
+          ldd "$binary"
+          if ldd "$binary" | grep -qiE 'libsqlite3|libssl|libcrypto'; then
+            echo "the release binary links a system SQLite or TLS library" >&2
+            exit 1
+          fi
+          "$binary" --help
+          "$binary" print-schema config --version 1 > /dev/null
+          "$binary" print-schema run-report --version 1 > /dev/null

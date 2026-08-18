@@ -1,0 +1,33 @@
+version: 2
+
+# Conservative on purpose. This is a small project maintained by one person, and
+# every update has to pass both CI jobs and a dependency-policy review before it
+# can land, so a weekly flood of pull requests would be noise rather than
+# safety. Security updates arrive separately through Dependabot alerts, which are
+# not rate-limited by this schedule.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps"
+    groups:
+      # One pull request for the whole tree. Reviewing a single lockfile change
+      # against docs/DEPENDENCIES.md is more useful than reviewing ten.
+      cargo:
+        patterns:
+          - "*"

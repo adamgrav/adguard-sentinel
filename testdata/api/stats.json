@@ -1,0 +1,29 @@
+{
+  "time_units": "hours",
+  "num_dns_queries": 5000,
+  "num_blocked_filtering": 1250,
+  "num_replaced_safebrowsing": 0,
+  "num_replaced_safesearch": 0,
+  "num_replaced_parental": 0,
+  "avg_processing_time": 0.0182,
+  "top_queried_domains": [{"discarded.example.invalid": 412}],
+  "top_clients": [
+    {"192.0.2.10": 3100},
+    {"192.0.2.11": 1900}
+  ],
+  "top_blocked_domains": [{"discarded-blocked.example.invalid": 208}],
+  "top_upstreams_responses": [
+    {"quic://dns10.quad9.net": 2100},
+    {"tls://unfiltered.adguard-dns.com": 1600},
+    {"https://cloudflare-dns.com/dns-query": 1300}
+  ],
+  "top_upstreams_avg_time": [
+    {"quic://dns10.quad9.net": 0.0241},
+    {"tls://unfiltered.adguard-dns.com": 0.0195},
+    {"https://cloudflare-dns.com/dns-query": 0.0212}
+  ],
+  "dns_queries": [5000],
+  "blocked_filtering": [1250],
+  "replaced_safebrowsing": [0],
+  "replaced_parental": [0]
+}

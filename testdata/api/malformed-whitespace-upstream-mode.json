@@ -1,0 +1,4 @@
+{
+  "upstream_dns": ["quic://dns10.quad9.net"],
+  "upstream_mode": "   "
+}

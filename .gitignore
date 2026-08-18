@@ -1,0 +1,10 @@
+/target/
+/.direnv/
+/.env.local
+/local_docs/
+/result
+/result-*
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.tmp

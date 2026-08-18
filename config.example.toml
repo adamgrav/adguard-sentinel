@@ -1,0 +1,84 @@
+schema_version = 1
+
+[state]
+path = "/var/lib/adguard-sentinel/state.sqlite"
+retention_days = 21
+
+[observation]
+request_timeout_ms = 5000
+notification_timeout_ms = 15000
+max_response_bytes = 4194304
+stats_lookback_ms = 3600000
+target_concurrency = 2
+minimum_complete_targets = 1
+adguard_version_requirement = ">=0.107.78,<0.108.0"
+
+[behavioral_baseline]
+target_ids = ["resolver-a", "resolver-b"]
+time_zone = "Europe/Amsterdam"
+learning_days = 7
+minimum_same_hour_samples = 36
+
+[condition_profiles.current]
+authentication_rejected_sustain_runs = 1
+api_unavailable_sustain_runs = 4
+invalid_response_sustain_runs = 1
+unsupported_version_sustain_runs = 1
+protection_disabled_sustain_runs = 2
+processing_latency_sustain_runs = 4
+upstream_latency_sustain_runs = 4
+policy_drift_sustain_runs = 4
+behavioral_anomaly_sustain_runs = 4
+recovery_runs = 1
+authentication_retry_seconds = 900
+processing_latency_ms = 500
+upstream_latency_ms = 750
+
+[notifications]
+provider = "disabled"
+
+[policies.home]
+protection_enabled = true
+upstream_mode = "load_balance"
+upstream_dns = [
+  "quic://dns10.quad9.net",
+  "tls://unfiltered.adguard-dns.com",
+  "https://cloudflare-dns.com/dns-query",
+]
+
+[[policies.home.filters]]
+url = "https://filters.example.invalid/enabled.txt"
+enabled = true
+maximum_age_hours = 72
+
+[[policies.home.filters]]
+url = "https://filters.example.invalid/disabled.txt"
+enabled = false
+
+[policies.home.rewrites]
+enabled = true
+
+[[policies.home.rewrites.required]]
+domain = "service-a.example.invalid"
+answer = "192.0.2.10"
+enabled = true
+
+[[targets]]
+id = "resolver-a"
+name = "Resolver A"
+base_url = "https://resolver-a.example.invalid"
+username = "admin"
+password_file = "/run/credentials/adguard-sentinel.service/resolver-a-password"
+policy = "home"
+condition_profile = "current"
+allow_insecure_local_http = false
+
+[[targets]]
+id = "resolver-b"
+name = "Resolver B"
+base_url = "https://resolver-b.example.invalid"
+username = "admin"
+password_file = "/run/credentials/adguard-sentinel.service/resolver-b-password"
+policy = "home"
+condition_profile = "current"
+allow_insecure_local_http = false

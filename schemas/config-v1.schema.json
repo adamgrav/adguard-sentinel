@@ -1,0 +1,419 @@
+{
+  "$defs": {
+    "BehavioralBaselineConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "learning_days": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minimum_same_hour_samples": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "time_zone": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_ids",
+        "time_zone",
+        "learning_days",
+        "minimum_same_hour_samples"
+      ],
+      "type": "object"
+    },
+    "ConditionProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "api_unavailable_sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "authentication_rejected_sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "authentication_retry_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "behavioral_anomaly_sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invalid_response_sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy_drift_sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processing_latency_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "processing_latency_sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protection_disabled_sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "recovery_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unsupported_version_sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upstream_latency_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upstream_latency_sustain_runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "authentication_rejected_sustain_runs",
+        "api_unavailable_sustain_runs",
+        "invalid_response_sustain_runs",
+        "unsupported_version_sustain_runs",
+        "protection_disabled_sustain_runs",
+        "processing_latency_sustain_runs",
+        "upstream_latency_sustain_runs",
+        "policy_drift_sustain_runs",
+        "behavioral_anomaly_sustain_runs",
+        "recovery_runs",
+        "authentication_retry_seconds",
+        "processing_latency_ms",
+        "upstream_latency_ms"
+      ],
+      "type": "object"
+    },
+    "NotificationConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/NotificationProvider"
+        },
+        "pushover": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PushoverConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    },
+    "NotificationProvider": {
+      "enum": [
+        "disabled",
+        "pushover"
+      ],
+      "type": "string"
+    },
+    "ObservationConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "adguard_version_requirement": {
+          "type": "string"
+        },
+        "max_response_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minimum_complete_targets": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "notification_timeout_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "request_timeout_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stats_lookback_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_concurrency": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "request_timeout_ms",
+        "notification_timeout_ms",
+        "max_response_bytes",
+        "stats_lookback_ms",
+        "target_concurrency",
+        "minimum_complete_targets",
+        "adguard_version_requirement"
+      ],
+      "type": "object"
+    },
+    "PolicyConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "filters": {
+          "items": {
+            "$ref": "#/$defs/RequiredFilter"
+          },
+          "type": "array"
+        },
+        "protection_enabled": {
+          "type": "boolean"
+        },
+        "rewrites": {
+          "$ref": "#/$defs/RequiredRewrites"
+        },
+        "upstream_dns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "upstream_mode": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protection_enabled",
+        "upstream_mode",
+        "upstream_dns",
+        "filters",
+        "rewrites"
+      ],
+      "type": "object"
+    },
+    "PushoverConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "application_token_file": {
+          "type": "string"
+        },
+        "user_key_file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "application_token_file",
+        "user_key_file"
+      ],
+      "type": "object"
+    },
+    "RequiredFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "maximum_age_hours": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "RequiredRewrite": {
+      "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "domain",
+        "answer",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "RequiredRewrites": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "required": {
+          "items": {
+            "$ref": "#/$defs/RequiredRewrite"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "enabled",
+        "required"
+      ],
+      "type": "object"
+    },
+    "StateConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "retention_days": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "retention_days"
+      ],
+      "type": "object"
+    },
+    "TargetConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_insecure_local_http": {
+          "type": "boolean"
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "condition_profile": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "password_file": {
+          "type": "string"
+        },
+        "policy": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "base_url",
+        "username",
+        "password_file",
+        "policy",
+        "condition_profile",
+        "allow_insecure_local_http"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:adguard-sentinel:schema:config:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "behavioral_baseline": {
+      "$ref": "#/$defs/BehavioralBaselineConfig"
+    },
+    "condition_profiles": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ConditionProfile"
+      },
+      "type": "object"
+    },
+    "notifications": {
+      "$ref": "#/$defs/NotificationConfig"
+    },
+    "observation": {
+      "$ref": "#/$defs/ObservationConfig"
+    },
+    "policies": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PolicyConfig"
+      },
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "state": {
+      "$ref": "#/$defs/StateConfig"
+    },
+    "targets": {
+      "items": {
+        "$ref": "#/$defs/TargetConfig"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "state",
+    "observation",
+    "behavioral_baseline",
+    "condition_profiles",
+    "notifications",
+    "policies",
+    "targets"
+  ],
+  "title": "Config",
+  "type": "object"
+}
