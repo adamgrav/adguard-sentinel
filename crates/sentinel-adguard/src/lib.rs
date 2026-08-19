@@ -68,7 +68,7 @@ pub trait AdGuardReadClient: Send + Sync {
     async fn observe(
         &self,
         target: &TargetConfig,
-        policy: &PolicyConfig,
+        policy: Option<&PolicyConfig>,
         password: Option<&SecretString>,
         stats_lookback_ms: u64,
         now_unix_seconds: i64,
@@ -201,7 +201,7 @@ impl AdGuardReadClient for ReqwestAdGuardClient {
     async fn observe(
         &self,
         target: &TargetConfig,
-        policy: &PolicyConfig,
+        policy: Option<&PolicyConfig>,
         password: Option<&SecretString>,
         stats_lookback_ms: u64,
         now_unix_seconds: i64,
@@ -457,12 +457,12 @@ fn normalize_dns(dns: DnsResponse) -> Result<DnsObservation, AdGuardError> {
 
 fn normalize_filters(
     filters: Vec<FilterResponse>,
-    policy: &PolicyConfig,
+    policy: Option<&PolicyConfig>,
     now_unix_seconds: i64,
 ) -> Result<Vec<FilterObservation>, AdGuardError> {
     let required: BTreeSet<_> = policy
-        .filters
-        .iter()
+        .into_iter()
+        .flat_map(|policy| &policy.filters)
         .map(|filter| filter.url.as_str())
         .collect();
     let mut seen = BTreeSet::new();
@@ -675,7 +675,7 @@ mod tests {
             auth: TargetAuth::Basic,
             username: Some("admin".to_owned()),
             password_file: Some(PathBuf::from("/run/credentials/synthetic-password")),
-            policy: "home".to_owned(),
+            policy: Some("home".to_owned()),
             condition_profile: "current".to_owned(),
             allow_insecure_local_http: false,
         }
@@ -702,7 +702,7 @@ mod tests {
         client
             .observe(
                 &target(server.base_url()),
-                &example_policy(),
+                Some(&example_policy()),
                 Some(&SecretString::from("synthetic".to_owned())),
                 LOOKBACK_MS,
                 NOW,
@@ -757,7 +757,12 @@ mod tests {
 
         let dns = report.dns.expect("dns observation");
         assert_eq!(dns.upstream_mode, "load_balance");
-        assert_eq!(dns.upstream_dns, example_policy().upstream_dns);
+        assert_eq!(
+            dns.upstream_dns,
+            example_policy()
+                .upstream_dns
+                .expect("the example declares upstreams")
+        );
 
         let upstreams: Vec<_> = report
             .upstreams
@@ -839,7 +844,7 @@ mod tests {
         target.password_file = None;
 
         let report = bounded_client(TIMEOUT_MS, MAX_BYTES)
-            .observe(&target, &example_policy(), None, LOOKBACK_MS, NOW)
+            .observe(&target, Some(&example_policy()), None, LOOKBACK_MS, NOW)
             .await
             .expect("no-auth observation");
 
@@ -1278,7 +1283,7 @@ mod tests {
     fn retains_only_filters_named_by_declared_policy() {
         let observed = normalize_filters(
             filtering_of(FILTERING_STATUS).filters,
-            &example_policy(),
+            Some(&example_policy()),
             NOW,
         )
         .expect("golden filters");
@@ -1314,7 +1319,7 @@ mod tests {
     fn rejects_a_required_filter_updated_in_the_future() {
         let error = normalize_filters(
             filtering_of(MALFORMED_FUTURE_FILTER_UPDATE).filters,
-            &example_policy(),
+            Some(&example_policy()),
             NOW,
         )
         .expect_err("a future update time must fail");
@@ -1329,7 +1334,7 @@ mod tests {
     fn rejects_an_enabled_required_filter_without_an_update_time() {
         let error = normalize_filters(
             filtering_of(MALFORMED_ENABLED_FILTER_WITHOUT_UPDATE).filters,
-            &example_policy(),
+            Some(&example_policy()),
             NOW,
         )
         .expect_err("an enabled required filter needs an update time");
@@ -1349,7 +1354,7 @@ mod tests {
             ]}"#,
         );
 
-        let error = normalize_filters(response.filters, &example_policy(), NOW)
+        let error = normalize_filters(response.filters, Some(&example_policy()), NOW)
             .expect_err("a duplicated filter URL must fail");
 
         assert_eq!(

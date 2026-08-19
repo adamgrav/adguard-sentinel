@@ -203,34 +203,41 @@
       "additionalProperties": false,
       "properties": {
         "filters": {
+          "default": [],
           "items": {
             "$ref": "#/$defs/RequiredFilter"
           },
           "type": "array"
         },
         "protection_enabled": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "rewrites": {
-          "$ref": "#/$defs/RequiredRewrites"
+          "$ref": "#/$defs/RequiredRewrites",
+          "default": {
+            "enabled": null,
+            "required": []
+          }
         },
         "upstream_dns": {
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "upstream_mode": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "protection_enabled",
-        "upstream_mode",
-        "upstream_dns",
-        "filters",
-        "rewrites"
-      ],
       "type": "object"
     },
     "PushoverConfig": {
@@ -297,19 +304,19 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "required": {
+          "default": [],
           "items": {
             "$ref": "#/$defs/RequiredRewrite"
           },
           "type": "array"
         }
       },
-      "required": [
-        "enabled",
-        "required"
-      ],
       "type": "object"
     },
     "StateConfig": {
@@ -368,7 +375,10 @@
           ]
         },
         "policy": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "username": {
           "type": [
@@ -380,8 +390,7 @@
       "required": [
         "id",
         "name",
-        "base_url",
-        "policy"
+        "base_url"
       ],
       "type": "object"
     }
@@ -447,6 +456,7 @@
       "additionalProperties": {
         "$ref": "#/$defs/PolicyConfig"
       },
+      "default": {},
       "type": "object"
     },
     "schema_version": {
@@ -468,7 +478,6 @@
   },
   "required": [
     "schema_version",
-    "policies",
     "targets"
   ],
   "title": "Config",

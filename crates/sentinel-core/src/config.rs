@@ -54,6 +54,7 @@ pub struct Config {
     pub condition_profiles: BTreeMap<String, ConditionProfile>,
     #[serde(default)]
     pub notifications: NotificationConfig,
+    #[serde(default)]
     pub policies: BTreeMap<String, PolicyConfig>,
     pub targets: Vec<TargetConfig>,
 }
@@ -200,13 +201,15 @@ pub struct PushoverConfig {
     pub user_key_file: PathBuf,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
-    pub protection_enabled: bool,
-    pub upstream_mode: String,
-    pub upstream_dns: Vec<String>,
+    pub protection_enabled: Option<bool>,
+    pub upstream_mode: Option<String>,
+    pub upstream_dns: Option<Vec<String>>,
+    #[serde(default)]
     pub filters: Vec<RequiredFilter>,
+    #[serde(default)]
     pub rewrites: RequiredRewrites,
 }
 
@@ -218,10 +221,11 @@ pub struct RequiredFilter {
     pub maximum_age_hours: Option<u32>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredRewrites {
-    pub enabled: bool,
+    pub enabled: Option<bool>,
+    #[serde(default)]
     pub required: Vec<RequiredRewrite>,
 }
 
@@ -243,7 +247,7 @@ pub struct TargetConfig {
     pub auth: TargetAuth,
     pub username: Option<String>,
     pub password_file: Option<PathBuf>,
-    pub policy: String,
+    pub policy: Option<String>,
     #[serde(default = "default_condition_profile_id")]
     pub condition_profile: String,
     #[serde(default)]
@@ -469,28 +473,27 @@ fn validate_profiles(profiles: &BTreeMap<String, ConditionProfile>, errors: &mut
 }
 
 fn validate_policies(policies: &BTreeMap<String, PolicyConfig>, errors: &mut Vec<String>) {
-    if policies.is_empty() {
-        errors.push("policies must not be empty".to_owned());
-    }
     for (id, policy) in policies {
         if !valid_id(id) {
             errors.push(format!("policy id {id:?} is not a stable slug"));
         }
-        if policy.upstream_mode.trim().is_empty() || policy.upstream_dns.is_empty() {
-            errors.push(format!(
-                "policy {id:?} must declare upstream mode and servers"
-            ));
-        }
-        let upstreams: BTreeSet<_> = policy.upstream_dns.iter().collect();
-        if upstreams.len() != policy.upstream_dns.len()
-            || policy
-                .upstream_dns
-                .iter()
-                .any(|value| value.trim().is_empty())
+        if policy
+            .upstream_mode
+            .as_deref()
+            .is_some_and(|mode| mode.trim().is_empty())
         {
-            errors.push(format!(
-                "policy {id:?} upstream_dns must be unique and nonempty"
-            ));
+            errors.push(format!("policy {id:?} upstream_mode must not be empty"));
+        }
+        if let Some(upstream_dns) = &policy.upstream_dns {
+            let upstreams: BTreeSet<_> = upstream_dns.iter().collect();
+            if upstream_dns.is_empty()
+                || upstreams.len() != upstream_dns.len()
+                || upstream_dns.iter().any(|value| value.trim().is_empty())
+            {
+                errors.push(format!(
+                    "policy {id:?} upstream_dns must be unique and nonempty"
+                ));
+            }
         }
         let mut filter_urls = BTreeSet::new();
         for filter in &policy.filters {
@@ -580,10 +583,12 @@ fn validate_targets(config: &Config, check_secret_files: bool, errors: &mut Vec<
                 }
             }
         }
-        if !config.policies.contains_key(&target.policy) {
+        if let Some(policy) = &target.policy
+            && !config.policies.contains_key(policy)
+        {
             errors.push(format!(
-                "target {:?} references unknown policy {:?}",
-                target.id, target.policy
+                "target {:?} references unknown policy {policy:?}",
+                target.id
             ));
         }
         if !config
@@ -884,5 +889,58 @@ policy = "home"
                 .map(|profile| profile.processing_latency_ms),
             Some(ConditionProfile::default().processing_latency_ms)
         );
+    }
+
+    #[test]
+    fn one_no_auth_target_is_a_complete_minimal_configuration() {
+        let text = r#"
+schema_version = 1
+
+[[targets]]
+id = "resolver"
+name = "Resolver"
+base_url = "https://resolver.invalid"
+auth = "none"
+"#;
+        let config: Config = toml::from_str(text).expect("minimal configuration");
+
+        config.validate(false).expect("minimal semantics");
+        assert!(config.policies.is_empty());
+        assert!(config.targets[0].policy.is_none());
+        assert!(config.behavioral_baseline.is_none());
+        assert!(matches!(
+            config.notifications.provider,
+            NotificationProvider::Disabled
+        ));
+    }
+
+    #[test]
+    fn a_policy_can_declare_only_one_independent_field() {
+        let text = r#"
+schema_version = 1
+
+[policies.protection-only]
+protection_enabled = true
+
+[[targets]]
+id = "resolver"
+name = "Resolver"
+base_url = "https://resolver.invalid"
+auth = "none"
+policy = "protection-only"
+"#;
+        let config: Config = toml::from_str(text).expect("partial policy");
+
+        config.validate(false).expect("partial policy semantics");
+        let policy = config
+            .policies
+            .get("protection-only")
+            .expect("declared policy");
+        assert_eq!(policy.protection_enabled, Some(true));
+        assert!(policy.upstream_mode.is_none());
+        assert!(policy.upstream_dns.is_none());
+        assert!(policy.filters.is_empty());
+        assert!(policy.rewrites.enabled.is_none());
+        assert!(policy.rewrites.required.is_empty());
     }
 }

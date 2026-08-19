@@ -273,9 +273,10 @@ async fn check_with_sink(
                         format!("authentication retry is paused for {remaining} seconds"),
                     );
                 }
-                let policy = policies
-                    .get(&target.policy)
-                    .expect("configuration policy references were validated");
+                let policy = target
+                    .policy
+                    .as_ref()
+                    .and_then(|policy| policies.get(policy));
                 let password = passwords.get(&target.id);
                 match client
                     .observe(
@@ -304,10 +305,10 @@ async fn check_with_sink(
             .iter()
             .find(|report| report.id == target.id)
             .expect("every configured target has a report");
-        let policy = config
-            .policies
-            .get(&target.policy)
-            .expect("validated policy reference");
+        let policy = target
+            .policy
+            .as_ref()
+            .and_then(|policy| config.policies.get(policy));
         let profile = config
             .condition_profiles
             .get(&target.condition_profile)
@@ -788,8 +789,8 @@ mod tests {
     use httpmock::{Mock, MockServer};
     use jiff::Timestamp;
     use sentinel_core::{
-        Config, FixedClock, NotificationStatus, OutboxMessage, RunReport, RunStatus, TargetStatus,
-        TransitionKind,
+        Config, EvaluationOutcome, FixedClock, NotificationStatus, OutboxMessage, RunReport,
+        RunStatus, TargetStatus, TransitionKind,
     };
     use sentinel_store::{NotificationAttemptOutcome, StateStore};
     use tempfile::{TempDir, tempdir};
@@ -1088,6 +1089,86 @@ minimum_same_hour_samples = 36
         assert!(report.transitions.is_empty());
         assert!(report.health.met);
         assert_eq!(report.exit.reason, "observation completed");
+        for mock in mocks {
+            mock.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_v0_1_3_configuration_keeps_its_target_evaluations() {
+        let server = MockServer::start_async().await;
+        let mocks = serve_golden(&server).await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+
+        let code = run(&harness, FailOn::Never).await.expect("healthy run");
+
+        assert_eq!(code, 0);
+        let report = latest_report(&harness);
+        let target_evaluations: Vec<_> = report
+            .evaluations
+            .iter()
+            .filter(|evaluation| evaluation.target_id.as_deref() == Some("resolver-a"))
+            .map(|evaluation| {
+                (
+                    evaluation.id.as_str(),
+                    evaluation.kind.as_str(),
+                    evaluation.reason.as_str(),
+                    evaluation.outcome,
+                )
+            })
+            .collect();
+        assert_eq!(
+            target_evaluations,
+            [
+                (
+                    "target:resolver-a:api",
+                    "api",
+                    "available",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:processing-latency",
+                    "processing_latency",
+                    "within_threshold",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:protection",
+                    "protection",
+                    "enabled",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:rewrites-enabled",
+                    "rewrite_settings",
+                    "matches_policy",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:upstream-latency",
+                    "upstream_latency",
+                    "within_threshold",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:upstream-mode",
+                    "upstream_mode",
+                    "matches_policy",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:upstream-set",
+                    "upstream_set",
+                    "matches_policy",
+                    EvaluationOutcome::Clear,
+                ),
+            ]
+        );
         for mock in mocks {
             mock.assert_calls_async(1).await;
         }

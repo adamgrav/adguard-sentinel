@@ -115,7 +115,7 @@ pub fn evaluate_target_failure(
 
 pub fn evaluate_target(
     target: &TargetConfig,
-    policy: &PolicyConfig,
+    policy: Option<&PolicyConfig>,
     profile: &ConditionProfile,
     report: &TargetReport,
     now_unix_seconds: i64,
@@ -143,28 +143,30 @@ pub fn evaluate_target(
         profile.api_unavailable_sustain_runs,
         profile.recovery_runs,
     ));
-    evaluations.push(boolean_evaluation(
-        format!("target:{}:protection", target.id),
-        target,
-        "protection",
-        Severity::Critical,
-        Verdict::from_flag(
-            !operational.protection_enabled,
-            (
-                "disabled",
-                format!("{} AdGuard protection is disabled", target.name),
+    if let Some(protection_enabled) = policy.and_then(|policy| policy.protection_enabled) {
+        evaluations.push(boolean_evaluation(
+            format!("target:{}:protection", target.id),
+            target,
+            "protection",
+            Severity::Critical,
+            Verdict::from_flag(
+                !operational.protection_enabled,
+                (
+                    "disabled",
+                    format!("{} AdGuard protection is disabled", target.name),
+                ),
+                (
+                    "enabled",
+                    format!("{} AdGuard protection is enabled", target.name),
+                ),
             ),
-            (
-                "enabled",
-                format!("{} AdGuard protection is enabled", target.name),
-            ),
-        ),
-        policy.protection_enabled,
-        operational.protection_enabled,
-        "GET /control/status protection_enabled",
-        profile.protection_disabled_sustain_runs,
-        profile.recovery_runs,
-    ));
+            protection_enabled,
+            operational.protection_enabled,
+            "GET /control/status protection_enabled",
+            profile.protection_disabled_sustain_runs,
+            profile.recovery_runs,
+        ));
+    }
     evaluations.push(threshold_evaluation(
         format!("target:{}:processing-latency", target.id),
         target,
@@ -189,16 +191,18 @@ pub fn evaluate_target(
         profile.upstream_latency_sustain_runs,
         profile.recovery_runs,
     ));
-    evaluate_dns_policy(target, policy, profile, report, &mut evaluations);
-    evaluate_filters(
-        target,
-        policy,
-        profile,
-        report,
-        now_unix_seconds,
-        &mut evaluations,
-    );
-    evaluate_rewrites(target, policy, profile, report, &mut evaluations);
+    if let Some(policy) = policy {
+        evaluate_dns_policy(target, policy, profile, report, &mut evaluations);
+        evaluate_filters(
+            target,
+            policy,
+            profile,
+            report,
+            now_unix_seconds,
+            &mut evaluations,
+        );
+        evaluate_rewrites(target, policy, profile, report, &mut evaluations);
+    }
     evaluations
 }
 
@@ -212,52 +216,56 @@ fn evaluate_dns_policy(
     let Some(dns) = report.dns.as_ref() else {
         return;
     };
-    evaluations.push(boolean_evaluation(
-        format!("target:{}:upstream-mode", target.id),
-        target,
-        "upstream_mode",
-        Severity::Warning,
-        Verdict::from_flag(
-            dns.upstream_mode != policy.upstream_mode,
-            (
-                "drift",
-                format!("{} upstream mode differs from declared policy", target.name),
+    if let Some(expected_mode) = &policy.upstream_mode {
+        evaluations.push(boolean_evaluation(
+            format!("target:{}:upstream-mode", target.id),
+            target,
+            "upstream_mode",
+            Severity::Warning,
+            Verdict::from_flag(
+                dns.upstream_mode != *expected_mode,
+                (
+                    "drift",
+                    format!("{} upstream mode differs from declared policy", target.name),
+                ),
+                (
+                    "matches_policy",
+                    format!("{} upstream mode matches declared policy", target.name),
+                ),
             ),
-            (
-                "matches_policy",
-                format!("{} upstream mode matches declared policy", target.name),
+            expected_mode,
+            &dns.upstream_mode,
+            "GET /control/dns_info upstream_mode",
+            profile.policy_drift_sustain_runs,
+            profile.recovery_runs,
+        ));
+    }
+    if let Some(upstream_dns) = &policy.upstream_dns {
+        let expected: BTreeSet<_> = upstream_dns.iter().cloned().collect();
+        let observed: BTreeSet<_> = dns.upstream_dns.iter().cloned().collect();
+        evaluations.push(boolean_evaluation(
+            format!("target:{}:upstream-set", target.id),
+            target,
+            "upstream_set",
+            Severity::Warning,
+            Verdict::from_flag(
+                expected != observed,
+                (
+                    "drift",
+                    format!("{} upstream set differs from declared policy", target.name),
+                ),
+                (
+                    "matches_policy",
+                    format!("{} upstream set matches declared policy", target.name),
+                ),
             ),
-        ),
-        policy.upstream_mode.clone(),
-        dns.upstream_mode.clone(),
-        "GET /control/dns_info upstream_mode",
-        profile.policy_drift_sustain_runs,
-        profile.recovery_runs,
-    ));
-    let expected: BTreeSet<_> = policy.upstream_dns.iter().cloned().collect();
-    let observed: BTreeSet<_> = dns.upstream_dns.iter().cloned().collect();
-    evaluations.push(boolean_evaluation(
-        format!("target:{}:upstream-set", target.id),
-        target,
-        "upstream_set",
-        Severity::Warning,
-        Verdict::from_flag(
-            expected != observed,
-            (
-                "drift",
-                format!("{} upstream set differs from declared policy", target.name),
-            ),
-            (
-                "matches_policy",
-                format!("{} upstream set matches declared policy", target.name),
-            ),
-        ),
-        expected,
-        observed,
-        "GET /control/dns_info upstream_dns",
-        profile.policy_drift_sustain_runs,
-        profile.recovery_runs,
-    ));
+            expected,
+            observed,
+            "GET /control/dns_info upstream_dns",
+            profile.policy_drift_sustain_runs,
+            profile.recovery_runs,
+        ));
+    }
 }
 
 fn evaluate_filters(
@@ -350,31 +358,33 @@ fn evaluate_rewrites(
     report: &TargetReport,
     evaluations: &mut Vec<ConditionEvaluation>,
 ) {
-    evaluations.push(boolean_evaluation(
-        format!("target:{}:rewrites-enabled", target.id),
-        target,
-        "rewrite_settings",
-        Severity::Warning,
-        Verdict::from_flag(
-            report.rewrites_enabled != Some(policy.rewrites.enabled),
-            (
-                "drift",
-                format!(
-                    "{} rewrite settings differ from declared policy",
-                    target.name
+    if let Some(enabled) = policy.rewrites.enabled {
+        evaluations.push(boolean_evaluation(
+            format!("target:{}:rewrites-enabled", target.id),
+            target,
+            "rewrite_settings",
+            Severity::Warning,
+            Verdict::from_flag(
+                report.rewrites_enabled != Some(enabled),
+                (
+                    "drift",
+                    format!(
+                        "{} rewrite settings differ from declared policy",
+                        target.name
+                    ),
+                ),
+                (
+                    "matches_policy",
+                    format!("{} rewrite settings match declared policy", target.name),
                 ),
             ),
-            (
-                "matches_policy",
-                format!("{} rewrite settings match declared policy", target.name),
-            ),
-        ),
-        policy.rewrites.enabled,
-        report.rewrites_enabled,
-        "GET /control/rewrite/settings enabled",
-        profile.policy_drift_sustain_runs,
-        profile.recovery_runs,
-    ));
+            enabled,
+            report.rewrites_enabled,
+            "GET /control/rewrite/settings enabled",
+            profile.policy_drift_sustain_runs,
+            profile.recovery_runs,
+        ));
+    }
     let observed: BTreeMap<_, _> = report
         .rewrites
         .iter()
@@ -1045,16 +1055,16 @@ mod tests {
     fn ignores_extra_independent_policy_and_detects_stale_required_filter() {
         let target_config = target_config();
         let policy = PolicyConfig {
-            protection_enabled: true,
-            upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            protection_enabled: Some(true),
+            upstream_mode: Some("load_balance".to_owned()),
+            upstream_dns: Some(vec!["tls://resolver.invalid".to_owned()]),
             filters: vec![RequiredFilter {
                 url: "https://filters.invalid/required.txt".to_owned(),
                 enabled: true,
                 maximum_age_hours: Some(72),
             }],
             rewrites: RequiredRewrites {
-                enabled: true,
+                enabled: Some(true),
                 required: vec![RequiredRewrite {
                     domain: "required.invalid".to_owned(),
                     answer: "192.0.2.10".to_owned(),
@@ -1094,14 +1104,15 @@ mod tests {
                 enabled: true,
             },
         ];
-        let healthy = super::evaluate_target(&target_config, &policy, &profile(), &report, now);
+        let healthy =
+            super::evaluate_target(&target_config, Some(&policy), &profile(), &report, now);
         assert!(
             healthy
                 .iter()
                 .all(|evaluation| evaluation.outcome == EvaluationOutcome::Clear)
         );
         report.filters[0].last_updated_unix_seconds = Some(now - 72 * 3_600 - 1);
-        let stale = super::evaluate_target(&target_config, &policy, &profile(), &report, now);
+        let stale = super::evaluate_target(&target_config, Some(&policy), &profile(), &report, now);
         assert!(stale.iter().any(|evaluation| {
             evaluation.kind == "required_filter"
                 && evaluation.reason == "stale"
@@ -1109,7 +1120,8 @@ mod tests {
         }));
         report.filters.clear();
         report.rewrites.clear();
-        let missing = super::evaluate_target(&target_config, &policy, &profile(), &report, now);
+        let missing =
+            super::evaluate_target(&target_config, Some(&policy), &profile(), &report, now);
         assert!(missing.iter().any(|evaluation| {
             evaluation.kind == "required_filter"
                 && evaluation.reason == "missing"
@@ -1126,12 +1138,12 @@ mod tests {
     fn strict_latency_boundaries_and_protection_sustain_match_contract() {
         let target_config = target_config();
         let policy = PolicyConfig {
-            protection_enabled: true,
-            upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            protection_enabled: Some(true),
+            upstream_mode: Some("load_balance".to_owned()),
+            upstream_dns: Some(vec!["tls://resolver.invalid".to_owned()]),
             filters: Vec::new(),
             rewrites: RequiredRewrites {
-                enabled: true,
+                enabled: Some(true),
                 required: Vec::new(),
             },
         };
@@ -1139,8 +1151,13 @@ mod tests {
         let operational = report.operational.as_mut().expect("operational");
         operational.average_processing_seconds = 0.5;
         operational.maximum_upstream_seconds = 0.75;
-        let at_limit =
-            super::evaluate_target(&target_config, &policy, &profile(), &report, 1_800_000_000);
+        let at_limit = super::evaluate_target(
+            &target_config,
+            Some(&policy),
+            &profile(),
+            &report,
+            1_800_000_000,
+        );
         assert!(
             at_limit
                 .iter()
@@ -1156,8 +1173,13 @@ mod tests {
         operational.protection_enabled = false;
         operational.average_processing_seconds = 0.500_001;
         operational.maximum_upstream_seconds = 0.750_001;
-        let above =
-            super::evaluate_target(&target_config, &policy, &profile(), &report, 1_800_000_000);
+        let above = super::evaluate_target(
+            &target_config,
+            Some(&policy),
+            &profile(),
+            &report,
+            1_800_000_000,
+        );
         let protection = above
             .iter()
             .find(|evaluation| evaluation.kind == "protection")
@@ -1175,6 +1197,62 @@ mod tests {
                 })
                 .all(|evaluation| evaluation.outcome == EvaluationOutcome::Active
                     && evaluation.sustain_runs == 4)
+        );
+    }
+
+    #[test]
+    fn no_policy_emits_no_policy_evaluations() {
+        let evaluations = super::evaluate_target(
+            &target_config(),
+            None,
+            &profile(),
+            &target("a", 100, 10),
+            1_800_000_000,
+        );
+
+        let identities: Vec<_> = evaluations
+            .iter()
+            .map(|evaluation| (evaluation.id.as_str(), evaluation.kind.as_str()))
+            .collect();
+        assert_eq!(
+            identities,
+            [
+                ("target:a:api", "api"),
+                ("target:a:processing-latency", "processing_latency"),
+                ("target:a:upstream-latency", "upstream_latency"),
+            ]
+        );
+        assert!(
+            evaluations
+                .iter()
+                .all(|evaluation| evaluation.outcome == EvaluationOutcome::Clear)
+        );
+    }
+
+    #[test]
+    fn an_omitted_upstream_set_emits_no_upstream_set_evaluation() {
+        let policy = PolicyConfig {
+            upstream_mode: Some("load_balance".to_owned()),
+            ..PolicyConfig::default()
+        };
+
+        let evaluations = super::evaluate_target(
+            &target_config(),
+            Some(&policy),
+            &profile(),
+            &target("a", 100, 10),
+            1_800_000_000,
+        );
+
+        assert!(
+            evaluations
+                .iter()
+                .any(|evaluation| evaluation.kind == "upstream_mode")
+        );
+        assert!(
+            evaluations
+                .iter()
+                .all(|evaluation| evaluation.kind != "upstream_set")
         );
     }
 
@@ -1316,7 +1394,7 @@ mod tests {
 
         let evaluations = super::evaluate_target(
             &target_config(),
-            &policy,
+            Some(&policy),
             &profile(),
             &report,
             1_800_000_000,
@@ -1496,16 +1574,16 @@ mod tests {
         let now = 1_800_000_000;
         let url = "https://filters.invalid/required.txt";
         let policy = PolicyConfig {
-            protection_enabled: true,
-            upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            protection_enabled: Some(true),
+            upstream_mode: Some("load_balance".to_owned()),
+            upstream_dns: Some(vec!["tls://resolver.invalid".to_owned()]),
             filters: vec![RequiredFilter {
                 url: url.to_owned(),
                 enabled: true,
                 maximum_age_hours: Some(72),
             }],
             rewrites: RequiredRewrites {
-                enabled: true,
+                enabled: Some(true),
                 required: Vec::new(),
             },
         };
@@ -1531,10 +1609,11 @@ mod tests {
         for filters in [vec![seen], vec![stale], vec![wrong_state], Vec::new()] {
             let mut report = target("a", 100, 10);
             report.filters = filters;
-            let filter = super::evaluate_target(&target_config, &policy, &profile(), &report, now)
-                .into_iter()
-                .find(|evaluation| evaluation.id.contains(":filter:"))
-                .expect("a required filter evaluation");
+            let filter =
+                super::evaluate_target(&target_config, Some(&policy), &profile(), &report, now)
+                    .into_iter()
+                    .find(|evaluation| evaluation.id.contains(":filter:"))
+                    .expect("a required filter evaluation");
             assert_eq!(filter.kind, "required_filter");
             ids.push(filter.id);
             reasons.push(filter.reason);
@@ -1554,7 +1633,7 @@ mod tests {
         unavailable.complete = false;
         unavailable.operational = None;
         let api = |report: &TargetReport| {
-            super::evaluate_target(&target_config, &policy, &profile(), report, now)
+            super::evaluate_target(&target_config, Some(&policy), &profile(), report, now)
                 .into_iter()
                 .find(|evaluation| evaluation.id == "target:a:api")
                 .expect("an api evaluation")
@@ -1575,16 +1654,16 @@ mod tests {
         let now = 1_800_000_000;
         let url = "https://filters.invalid/required.txt";
         let policy = PolicyConfig {
-            protection_enabled: true,
-            upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            protection_enabled: Some(true),
+            upstream_mode: Some("load_balance".to_owned()),
+            upstream_dns: Some(vec!["tls://resolver.invalid".to_owned()]),
             filters: vec![RequiredFilter {
                 url: url.to_owned(),
                 enabled: true,
                 maximum_age_hours: Some(72),
             }],
             rewrites: RequiredRewrites {
-                enabled: true,
+                enabled: Some(true),
                 required: vec![RequiredRewrite {
                     domain: "required.invalid".to_owned(),
                     answer: "192.0.2.10".to_owned(),
@@ -1608,7 +1687,7 @@ mod tests {
         }];
 
         let evaluations =
-            super::evaluate_target(&target_config(), &policy, &profile(), &report, now);
+            super::evaluate_target(&target_config(), Some(&policy), &profile(), &report, now);
 
         assert!(!evaluations.is_empty());
         for evaluation in &evaluations {
@@ -1648,7 +1727,7 @@ mod tests {
             auth: TargetAuth::Basic,
             username: Some("admin".to_owned()),
             password_file: Some("/run/credentials/password".into()),
-            policy: "home".to_owned(),
+            policy: Some("home".to_owned()),
             condition_profile: "current".to_owned(),
             allow_insecure_local_http: false,
         }
@@ -1656,11 +1735,14 @@ mod tests {
 
     fn rewrite_policy(required: Vec<RequiredRewrite>, enabled: bool) -> PolicyConfig {
         PolicyConfig {
-            protection_enabled: true,
-            upstream_mode: "load_balance".to_owned(),
-            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            protection_enabled: Some(true),
+            upstream_mode: Some("load_balance".to_owned()),
+            upstream_dns: Some(vec!["tls://resolver.invalid".to_owned()]),
             filters: Vec::new(),
-            rewrites: RequiredRewrites { enabled, required },
+            rewrites: RequiredRewrites {
+                enabled: Some(enabled),
+                required,
+            },
         }
     }
 
@@ -1686,10 +1768,16 @@ mod tests {
     ) -> Vec<ConditionEvaluation> {
         let mut report = target("a", 100, 10);
         report.rewrites = observed;
-        super::evaluate_target(&target_config(), policy, &profile(), &report, 1_800_000_000)
-            .into_iter()
-            .filter(|evaluation| evaluation.kind.contains("rewrite"))
-            .collect()
+        super::evaluate_target(
+            &target_config(),
+            Some(policy),
+            &profile(),
+            &report,
+            1_800_000_000,
+        )
+        .into_iter()
+        .filter(|evaluation| evaluation.kind.contains("rewrite"))
+        .collect()
     }
 
     fn target(id: &str, queries: u64, blocked: u64) -> TargetReport {
