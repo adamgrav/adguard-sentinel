@@ -53,6 +53,9 @@ a coverage map that only listed strengths would be marketing.
 
 - Alerts latch once and resolve once. A not-evaluated outcome freezes a firing
   latch without advancing or clearing it.
+- A firing, delivered latch fed a renamed kind, reason, and summary emits no
+  transition, keeps its lifecycle and delivery state, continues its counter
+  rather than restarting it, and keeps its first-observed timestamp.
 - Aggregate thresholds are clear at equality and active above it.
 - SQLite creation with private permissions, refusal of a newer schema, rollback
   after an interrupted transaction, live and dry-run state binding, retention at

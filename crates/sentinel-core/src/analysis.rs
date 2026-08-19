@@ -1396,6 +1396,84 @@ mod tests {
         assert_eq!(state.alert_delivery_state, before.alert_delivery_state);
     }
 
+    /// Latch continuity depends on the condition id and nothing else. Kind,
+    /// reason, and summary are presentation: editing any of them must not emit a
+    /// transition, restart the counters, or lose when the condition started. See
+    /// ADR 0010.
+    #[test]
+    fn presentation_changes_never_disturb_a_latch() {
+        let mut evaluation = ConditionEvaluation {
+            id: "target:a:filter:0123456789abcdef".to_owned(),
+            target_id: Some("a".to_owned()),
+            kind: "required_filter_stale".to_owned(),
+            reason: "unrecorded".to_owned(),
+            severity: Severity::Warning,
+            outcome: EvaluationOutcome::Active,
+            summary: "Resolver A has a stale required filter".to_owned(),
+            expected: json!({ "enabled": true }),
+            observed: json!({ "enabled": true }),
+            evidence_source: "fixture".to_owned(),
+            observation_complete: true,
+            sustain_runs: 2,
+            recovery_runs: 1,
+            consecutive_active: 0,
+            consecutive_clear: 0,
+            lifecycle: ConditionLifecycle::Clear,
+            notification_state: AlertDeliveryState::Never,
+            first_observed_at: None,
+        };
+        let mut state = ConditionState::from_evaluation(&evaluation);
+
+        // Two active runs to reach the sustain threshold, then delivery, which is
+        // what the notification layer records once Pushover confirms.
+        assert!(
+            advance_condition(
+                &mut state,
+                &mut evaluation,
+                "2026-01-01T00:00:00Z",
+                "1",
+                false
+            )
+            .is_none()
+        );
+        assert!(
+            advance_condition(
+                &mut state,
+                &mut evaluation,
+                "2026-01-01T00:05:00Z",
+                "2",
+                false
+            )
+            .is_some()
+        );
+        state.alert_delivery_state = AlertDeliveryState::Delivered;
+        assert_eq!(state.lifecycle, ConditionLifecycle::Firing);
+        let started = state.first_observed_at.clone();
+        assert!(started.is_some());
+
+        // The same condition, still active, now described differently.
+        evaluation.kind = "required_filter".to_owned();
+        evaluation.reason = "stale".to_owned();
+        evaluation.summary = "Resolver A required filter is stale".to_owned();
+
+        let transition = advance_condition(
+            &mut state,
+            &mut evaluation,
+            "2026-01-01T00:10:00Z",
+            "3",
+            false,
+        );
+
+        assert!(transition.is_none(), "renaming must not re-alert");
+        assert_eq!(state.lifecycle, ConditionLifecycle::Firing);
+        assert_eq!(state.alert_delivery_state, AlertDeliveryState::Delivered);
+        // The counter continues from where it was rather than restarting at one.
+        assert_eq!(state.consecutive_active, 3);
+        assert_eq!(state.first_observed_at, started);
+        // The new description is adopted, so state reflects the current release.
+        assert_eq!(state.kind, "required_filter");
+    }
+
     /// Recorded from a live run before 0.1.1: one condition id reported
     /// `required_filter_stale` on one run and `required_filter_state_drift` on
     /// the next, so anything grouping by kind saw two conditions where there is
