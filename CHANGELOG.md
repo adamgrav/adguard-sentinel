@@ -7,6 +7,22 @@ Notable changes to AdGuard Sentinel. The format follows
 
 Nothing yet.
 
+## 0.1.3 — 2026-08-19
+
+`rusqlite` 0.37 to 0.40, shipped on its own so a rollback of the storage layer is
+one version rather than a bundle.
+
+No interface, configuration, state, or behaviour change. The SQLite schema is
+unchanged at version 1 and its checksum is unchanged, so an existing database
+opens untouched and `migrate-state` is not involved.
+
+### Changed
+
+- `rusqlite` 0.37 to 0.40, which moves the bundled SQLite to `libsqlite3-sys`
+  0.38. `sqlite-wasm-rs` and `rsqlite-vfs` arrive as new transitive dependencies
+  but are gated to wasm targets and appear in neither the Linux nor the macOS
+  dependency graph.
+
 ## 0.1.2 — 2026-08-19
 
 Dependency updates only. No interface, configuration, state, or behaviour
