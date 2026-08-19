@@ -43,6 +43,11 @@ Every kind, and the reasons it can report:
 | `combined_query_volume` | `within_baseline`, `above_baseline`, `baseline_learning` |
 | `combined_blocked_ratio` | `within_baseline`, `outside_baseline`, `baseline_learning` |
 
+`severity` is the one field that deliberately varies for a given `id`: an
+unreachable resolver is a warning and a rejected credential is critical, because
+severity states how much the current outcome matters rather than what was
+checked. See [ADR 0010](decisions/0010-condition-identity-and-phrasing.md).
+
 `reason` is absent from reports persisted by 0.1.0 and reads back as
 `unrecorded`. Historical rows keep the `kind` and `summary` they were written
 with: the report records what was evaluated at the time rather than a view

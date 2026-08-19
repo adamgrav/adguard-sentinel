@@ -65,7 +65,8 @@ These are the design, not a disclaimer. They are why the project is small.
 Sentinel builds from source on `x86_64` Linux with Rust 1.97.1, and Nix provides
 the reproducible packaging path. Pushover is the only notification provider, and
 a systemd timer is the only supported scheduling method. AdGuard Home
-`>=0.107.78,<0.108.0` is the supported API range.
+`>=0.107.78,<0.108.0` is the supported API range; another range can be
+configured deliberately, but nothing here is claimed for it.
 
 There are no prebuilt binaries, no musl build, no container image, and no
 reusable NixOS service module.

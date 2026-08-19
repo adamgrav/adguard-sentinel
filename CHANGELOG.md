@@ -26,7 +26,9 @@ The run-report `schema_version` stays `1`. Two fields are renamed and the values
   condition alternated between `required_filter_stale` and
   `required_filter_state_drift` across runs, and anything grouping by kind saw
   several conditions where there is one. `kind` now names what was checked; the
-  divergence moved to the new `reason` field.
+  divergence moved to the new `reason` field. The invariant is recorded as
+  [ADR 0010](docs/decisions/0010-condition-identity-and-phrasing.md), which also
+  records why `severity` deliberately does vary for one condition.
 
   | Old `kind` | New `kind` | New `reason` |
   | --- | --- | --- |

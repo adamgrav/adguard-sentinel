@@ -41,6 +41,10 @@ a coverage map that only listed strengths would be marketing.
 - Filters and rewrites outside declared policy never produce a finding.
 - Required filter absence, state drift, and staleness at the configured age are
   detected.
+- One condition id keeps one `kind` across all four filter outcomes and across a
+  reachable and an unreachable target, and only `reason` varies.
+- Every evaluation of a fully compliant target is clear and no clear summary
+  contains the failure phrasing it ruled out.
 - Latency comparisons are strictly greater-than at their exact boundary.
 - Configuration schema, size, cross-reference, URL, duration, and secret-file
   validation. *thin*
@@ -53,6 +57,9 @@ a coverage map that only listed strengths would be marketing.
 - SQLite creation with private permissions, refusal of a newer schema, rollback
   after an interrupted transaction, live and dry-run state binding, retention at
   the inclusive cutoff, and notification backoff before delivery.
+- An evaluation persisted by 0.1.0 still deserializes, with the pre-rename
+  counter names honoured and `reason` defaulted, so `report` keeps working
+  against an existing state database. The current field names round-trip.
 - Injected time covers both Amsterdam DST edges.
 - A regressed wall clock fails before the run is recorded, leaving the earlier
   run as the only persisted one.
