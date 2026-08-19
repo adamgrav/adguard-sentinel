@@ -7,6 +7,25 @@ Notable changes to AdGuard Sentinel. The format follows
 
 Nothing yet.
 
+## 0.1.2 — 2026-08-19
+
+Dependency updates only. No interface, configuration, state, or behaviour
+change: the report schema, the configuration schema, and the SQLite schema are
+all unchanged, and an existing state database opens untouched.
+
+### Changed
+
+- `toml` 0.9 to 1.1, `base64` 0.22 to 0.23, and `sha2` 0.10 to 0.11.
+- Digests are encoded to hexadecimal directly rather than through the `digest`
+  crate's `LowerHex`, which `sha2` 0.11 no longer provides. The encoding is
+  byte-identical and now pinned by tests against independently computed values,
+  because two of these digests are load-bearing: condition identifiers embed
+  one, and the state schema checksum that every database is validated against is
+  another.
+- `docs/DEPENDENCIES.md` records the duplicate set after the upgrade. `toml` 1.1
+  removes the duplicate `winnow`; `base64` 0.23 adds a duplicate of its own,
+  because `reqwest` and `httpmock` still reach 0.22.
+
 ## 0.1.1 — 2026-08-19
 
 Report presentation and configuration-message fixes, all found during the first
