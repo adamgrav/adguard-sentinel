@@ -310,7 +310,7 @@ impl Config {
     pub fn fingerprint(&self) -> String {
         let serialized = serde_json::to_vec(self).expect("serializing Config cannot fail");
         let digest = Sha256::digest(serialized);
-        format!("sha256:{digest:x}")
+        format!("sha256:{}", crate::hex::encode(&digest))
     }
 }
 
