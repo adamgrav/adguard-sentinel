@@ -56,11 +56,11 @@ carrying the duplicate. Review this table whenever `Cargo.lock` changes.
 
 | Crate | Versions | Reason |
 | --- | --- | --- |
+| base64 | 0.22, 0.23 | Direct use is 0.23; `reqwest` reaches 0.22 through `hyper-util`, and `httpmock` through `headers` |
 | getrandom | 0.2, 0.4 | Two generations of the randomness API are pulled in by separate dependents |
 | hashbrown | 0.15, 0.17 | Interior map dependency of crates that upgraded on different schedules |
 | syn | 2, 3 | Proc-macro dependency; build-time only, absent from the binary |
 | windows-sys | 0.52, 0.61 | Platform bindings; not reached in the Linux or macOS builds this project targets |
-| winnow | 0.7, 1.0 | `toml` and its own `toml_parser` currently resolve to different majors |
 
 None of these is a security advisory. `just supply-chain` enforces advisories,
 licenses, bans, and sources, and would fail on a real vulnerability.

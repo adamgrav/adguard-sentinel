@@ -1380,7 +1380,7 @@ fn parse_timestamp(value: &str) -> Result<i64, StoreError> {
 
 fn schema_checksum() -> String {
     let digest = Sha256::digest(SCHEMA.as_bytes());
-    format!("sha256:{digest:x}")
+    format!("sha256:{}", sentinel_core::hex::encode(&digest))
 }
 
 fn set_private_permissions(path: &Path) -> Result<(), StoreError> {
@@ -1455,6 +1455,17 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{NotificationAttemptOutcome, StateStore, StoreError, prune_runs};
+
+    #[test]
+    fn schema_checksum_is_stable() {
+        // Independently computed: shasum -a 256 schemas/state-v1.sql. Every
+        // existing database carries this value and is validated against it on
+        // open, so it may only change when the schema itself does.
+        assert_eq!(
+            super::schema_checksum(),
+            "sha256:c20114ff4e503f57ec4d0da4c9e667ed1158efae9a0b4eb7738f7fef9ca29c1d"
+        );
+    }
 
     #[test]
     fn creates_version_one_database_with_private_permissions() {

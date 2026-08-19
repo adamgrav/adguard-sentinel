@@ -3,6 +3,7 @@
 pub mod analysis;
 pub mod clock;
 pub mod config;
+pub mod hex;
 pub mod model;
 
 pub use analysis::{

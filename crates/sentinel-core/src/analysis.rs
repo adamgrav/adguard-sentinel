@@ -866,7 +866,7 @@ fn evaluation(
 
 fn short_hash(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
-    format!("{digest:x}")[..16].to_owned()
+    crate::hex::encode(&digest)[..16].to_owned()
 }
 
 #[cfg(test)]
@@ -885,6 +885,17 @@ mod tests {
         OperationalObservation, RewriteObservation, Severity, TargetReport, TargetStatus,
         TransitionKind,
     };
+
+    /// Condition identifiers embed this hash and latch state is keyed on the
+    /// identifier, so a change here silently resets every latch on every
+    /// deployment. Pinned against an independently computed SHA-256 prefix.
+    #[test]
+    fn short_hash_is_stable() {
+        assert_eq!(
+            super::short_hash("https://filters.invalid/required.txt"),
+            "a0917584ced31967"
+        );
+    }
 
     #[test]
     fn robust_bounds_match_behavior_contract() {
