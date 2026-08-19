@@ -877,7 +877,7 @@ mod tests {
     use super::{advance_condition, evaluate_aggregate, local_time_bucket, robust_bounds};
     use crate::config::{
         BehavioralBaselineConfig, ConditionProfile, PolicyConfig, RequiredFilter, RequiredRewrite,
-        RequiredRewrites, TargetConfig,
+        RequiredRewrites, TargetAuth, TargetConfig,
     };
     use crate::model::{
         AlertDeliveryState, BaselineSample, ConditionEvaluation, ConditionLifecycle,
@@ -1645,8 +1645,9 @@ mod tests {
             id: "a".to_owned(),
             name: "Resolver A".to_owned(),
             base_url: "https://resolver-a.invalid".to_owned(),
-            username: "admin".to_owned(),
-            password_file: "/run/credentials/password".into(),
+            auth: TargetAuth::Basic,
+            username: Some("admin".to_owned()),
+            password_file: Some("/run/credentials/password".into()),
             policy: "home".to_owned(),
             condition_profile: "current".to_owned(),
             allow_insecure_local_http: false,

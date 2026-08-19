@@ -18,8 +18,8 @@ use sentinel_adguard::{AdGuardError, AdGuardReadClient, ReqwestAdGuardClient};
 use sentinel_core::{
     AlertDeliveryState, Clock, Config, EvaluationOutcome, ExitReport, NotificationProvider,
     NotificationStatus, REPORT_SCHEMA_VERSION, RunHealth, RunMode, RunReport, RunStatus,
-    STATE_SCHEMA_VERSION, Severity, SystemClock, TargetReport, TargetStatus, TransitionKind,
-    evaluate_aggregate, evaluate_target, local_time_bucket,
+    STATE_SCHEMA_VERSION, Severity, SystemClock, TargetAuth, TargetReport, TargetStatus,
+    TransitionKind, evaluate_aggregate, evaluate_target, local_time_bucket,
 };
 use sentinel_store::{NotificationAttemptOutcome, StateStore, canonical_state_schema};
 use tracing_subscriber::EnvFilter;
@@ -276,9 +276,7 @@ async fn check_with_sink(
                 let policy = policies
                     .get(&target.policy)
                     .expect("configuration policy references were validated");
-                let password = passwords
-                    .get(&target.id)
-                    .expect("every target password was loaded");
+                let password = passwords.get(&target.id);
                 match client
                     .observe(
                         &target,
@@ -623,7 +621,14 @@ fn versioned_schema<T: serde::Serialize>(
 fn read_target_passwords(config: &Config) -> anyhow::Result<BTreeMap<String, SecretString>> {
     let mut passwords = BTreeMap::new();
     for target in &config.targets {
-        let metadata = fs::metadata(&target.password_file)
+        if target.auth == TargetAuth::None {
+            continue;
+        }
+        let password_file = target
+            .password_file
+            .as_deref()
+            .ok_or_else(|| anyhow!("target {} has no password file", target.id))?;
+        let metadata = fs::metadata(password_file)
             .with_context(|| format!("cannot inspect password file for target {}", target.id))?;
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(anyhow!(
@@ -631,7 +636,7 @@ fn read_target_passwords(config: &Config) -> anyhow::Result<BTreeMap<String, Sec
                 target.id
             ));
         }
-        let password = fs::read_to_string(&target.password_file)
+        let password = fs::read_to_string(password_file)
             .with_context(|| format!("cannot read password file for target {}", target.id))?
             .trim_end_matches(['\r', '\n'])
             .to_owned();

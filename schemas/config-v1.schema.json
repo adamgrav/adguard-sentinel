@@ -330,11 +330,22 @@
       ],
       "type": "object"
     },
+    "TargetAuth": {
+      "enum": [
+        "none",
+        "basic"
+      ],
+      "type": "string"
+    },
     "TargetConfig": {
       "additionalProperties": false,
       "properties": {
         "allow_insecure_local_http": {
           "type": "boolean"
+        },
+        "auth": {
+          "$ref": "#/$defs/TargetAuth",
+          "default": "basic"
         },
         "base_url": {
           "type": "string"
@@ -349,21 +360,25 @@
           "type": "string"
         },
         "password_file": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "policy": {
           "type": "string"
         },
         "username": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "id",
         "name",
         "base_url",
-        "username",
-        "password_file",
         "policy",
         "condition_profile",
         "allow_insecure_local_http"

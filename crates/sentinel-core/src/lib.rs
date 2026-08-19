@@ -12,6 +12,7 @@ pub use analysis::{
 };
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::{
-    ConditionProfile, Config, ConfigError, NotificationProvider, PolicyConfig, TargetConfig,
+    ConditionProfile, Config, ConfigError, NotificationProvider, PolicyConfig, TargetAuth,
+    TargetConfig,
 };
 pub use model::*;

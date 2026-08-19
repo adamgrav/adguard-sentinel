@@ -113,6 +113,14 @@ pub enum NotificationProvider {
     Pushover,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetAuth {
+    None,
+    #[default]
+    Basic,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NotificationConfig {
@@ -166,8 +174,10 @@ pub struct TargetConfig {
     pub id: String,
     pub name: String,
     pub base_url: String,
-    pub username: String,
-    pub password_file: PathBuf,
+    #[serde(default)]
+    pub auth: TargetAuth,
+    pub username: Option<String>,
+    pub password_file: Option<PathBuf>,
     pub policy: String,
     pub condition_profile: String,
     pub allow_insecure_local_http: bool,
@@ -461,8 +471,40 @@ fn validate_targets(config: &Config, check_secret_files: bool, errors: &mut Vec<
                 target.name
             ));
         }
-        if target.username.trim().is_empty() {
-            errors.push(format!("target {:?} username must not be empty", target.id));
+        match target.auth {
+            TargetAuth::None => {
+                if target.username.is_some() || target.password_file.is_some() {
+                    errors.push(format!(
+                        "target {:?} must omit username and password_file when auth is none",
+                        target.id
+                    ));
+                }
+            }
+            TargetAuth::Basic => {
+                match target.username.as_deref() {
+                    Some(username) if !username.trim().is_empty() => {}
+                    _ => errors.push(format!(
+                        "target {:?} username must not be empty when auth is basic",
+                        target.id
+                    )),
+                }
+                match target.password_file.as_deref() {
+                    Some(password_file) => {
+                        validate_absolute_path("target.password_file", password_file, errors);
+                        if check_secret_files {
+                            validate_secret_file(
+                                password_file,
+                                &format!("target {:?} password", target.id),
+                                errors,
+                            );
+                        }
+                    }
+                    None => errors.push(format!(
+                        "target {:?} password_file is required when auth is basic",
+                        target.id
+                    )),
+                }
+            }
         }
         if !config.policies.contains_key(&target.policy) {
             errors.push(format!(
@@ -480,14 +522,6 @@ fn validate_targets(config: &Config, check_secret_files: bool, errors: &mut Vec<
             ));
         }
         validate_target_url(target, errors);
-        validate_absolute_path("target.password_file", &target.password_file, errors);
-        if check_secret_files {
-            validate_secret_file(
-                &target.password_file,
-                &format!("target {:?} password", target.id),
-                errors,
-            );
-        }
     }
     let configured_ids: BTreeSet<_> = config.targets.iter().map(|target| &target.id).collect();
     let baseline_ids: BTreeSet<_> = config.behavioral_baseline.target_ids.iter().collect();
@@ -639,7 +673,7 @@ pub fn normalize_rewrite_answer(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, normalize_dns_name, normalize_rewrite_answer};
+    use super::{Config, TargetAuth, normalize_dns_name, normalize_rewrite_answer};
 
     #[test]
     fn normalizes_dns_values() {
@@ -661,5 +695,49 @@ mod tests {
             include_str!("../../../config.example.toml")
         );
         assert!(toml::from_str::<Config>(&text).is_err());
+    }
+
+    #[test]
+    fn omitted_auth_preserves_basic_authentication() {
+        let text = include_str!("../../../config.example.toml").replace("auth = \"basic\"\n", "");
+        let config: Config = toml::from_str(&text).expect("v0.1.3 example TOML");
+
+        assert!(
+            config
+                .targets
+                .iter()
+                .all(|target| target.auth == TargetAuth::Basic)
+        );
+        config.validate(false).expect("v0.1.3 authentication");
+    }
+
+    #[test]
+    fn no_authentication_needs_no_credentials() {
+        let mut config: Config =
+            toml::from_str(include_str!("../../../config.example.toml")).expect("example TOML");
+        for target in &mut config.targets {
+            target.auth = TargetAuth::None;
+            target.username = None;
+            target.password_file = None;
+        }
+
+        config.validate(false).expect("no-auth targets");
+    }
+
+    #[test]
+    fn basic_authentication_still_requires_file_credentials() {
+        let mut config: Config =
+            toml::from_str(include_str!("../../../config.example.toml")).expect("example TOML");
+        config.targets[0].password_file = None;
+
+        let error = config
+            .validate(false)
+            .expect_err("basic auth without a password file must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("target \"resolver-a\" password_file is required when auth is basic")
+        );
     }
 }
