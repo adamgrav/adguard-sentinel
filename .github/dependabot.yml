@@ -26,8 +26,19 @@ updates:
     commit-message:
       prefix: "deps"
     groups:
-      # One pull request for the whole tree. Reviewing a single lockfile change
+      # rusqlite ships alone so a storage-layer rollback is one version rather
+      # than a bundle. A regression there is silent and cumulative — state,
+      # retention, or permissions degrading over days without an error — where a
+      # parser or hashing bump fails loudly on the next run. It also needs the
+      # isolated alert and recovery exercise in docs/DEPLOYMENT.md re-run, which
+      # is not worth dragging unrelated updates through.
+      cargo-storage:
+        patterns:
+          - "rusqlite"
+      # Everything else in one pull request. Reviewing a single lockfile change
       # against docs/DEPENDENCIES.md is more useful than reviewing ten.
       cargo:
         patterns:
           - "*"
+        exclude-patterns:
+          - "rusqlite"
