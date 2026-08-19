@@ -36,7 +36,7 @@ Run with `--format json` and read `targets[].status` and `targets[].error_kind`.
 | `unavailable` | Connection refused, timed out, or a non-success HTTP status | Check reachability and `observation.request_timeout_ms`. A redirect also lands here: Sentinel does not follow redirects, so a proxy that redirects the API will fail |
 | `authentication_rejected` | The API returned 401 or 403 | Check the username and the contents of `password_file`. See the cooldown section below |
 | `authentication_cooldown` | A previous rejection is still being backed off | Expected after a rejection. See below |
-| `unsupported_version` | The server is outside `>=0.107.78,<0.108.0` | Only that range is supported. Do not widen it in configuration; validation pins it |
+| `unsupported_version` | The server is outside the configured `observation.adguard_version_requirement` | Only `>=0.107.78,<0.108.0` has recorded evidence. A different range can be configured, but it needs `observation.allow_untested_adguard_version = true` and it is untested. See below |
 | `invalid_response` | A response failed strict validation | See below |
 | `response_too_large` | A body exceeded `observation.max_response_bytes` | Raise the limit only if you understand why the response is that large |
 
@@ -179,18 +179,47 @@ the aggregate to advance at all.
 Only *declared* policy is compared. Extra filters and rewrites that your
 configuration does not mention are ignored by design.
 
-- `upstream_mode_drift`: AdGuard Home `0.107.78` reports load balancing as an
+Findings are identified by a stable `kind` plus the `reason` that fired, so
+`upstream_mode` with `reason: "drift"` is one condition rather than a separate
+kind per failure mode.
+
+- `upstream_mode` / `drift`: AdGuard Home `0.107.78` reports load balancing as an
   empty string, which Sentinel normalises to `load_balance`. Declare
   `load_balance`, not `""`.
-- `required_rewrite_drift` with `observed: null`: no rewrite matches that exact
-  domain **and** answer pair. A rewrite for the same domain with a different
-  answer does not satisfy the requirement.
-- `required_filter_stale`: the filter's last update is older than
+- `required_rewrite` / `missing_or_disabled` with `observed: null`: no rewrite
+  matches that exact domain **and** answer pair. A rewrite for the same domain
+  with a different answer does not satisfy the requirement.
+- `required_filter` / `stale`: the filter's last update is older than
   `maximum_age_hours`. Check that AdGuard Home is actually refreshing lists.
 
 Domains and rewrite answers are compared after normalisation, so casing and a
 trailing dot do not matter, and reformatting your configuration will not reset a
 latch.
+
+## An AdGuard Home version outside the tested range
+
+`>=0.107.78,<0.108.0` is the only range with recorded evidence behind it, and it
+is the default. Configuring any other range is refused unless the choice is
+explicit:
+
+```text
+- observation.adguard_version_requirement is ">=0.108.0,<0.109.0", but only
+  ">=0.107.78,<0.108.0" has recorded evidence; set
+  observation.allow_untested_adguard_version = true to accept an untested range
+```
+
+Setting `observation.allow_untested_adguard_version = true` accepts the range you
+configured. It changes nothing else: the requirement is still enforced at the
+request boundary before any other endpoint is read, responses are still validated
+strictly, and a server outside your range is still an incomplete observation.
+What you lose is the evidence, so every run says so:
+
+```text
+WARN accepting an AdGuard Home version requirement with no recorded evidence behind it
+```
+
+Treat a widened range as a local experiment rather than a supported
+configuration, and read `docs/SUPPORT.md` for what that distinction means.
 
 ## Reporting a problem
 

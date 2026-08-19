@@ -152,6 +152,11 @@
         "adguard_version_requirement": {
           "type": "string"
         },
+        "allow_untested_adguard_version": {
+          "default": false,
+          "description": "Accept an `adguard_version_requirement` outside the range this release\nhas recorded evidence for. Defaults to false, so the tested range is\nwhat you get unless you say otherwise. An accepted untested range is\nstill enforced at the request boundary; only the choice of range is\nwidened, never the strictness of the check.",
+          "type": "boolean"
+        },
         "max_response_bytes": {
           "format": "uint64",
           "minimum": 0,

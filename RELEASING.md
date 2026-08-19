@@ -14,7 +14,7 @@ number:
 | --- | --- | --- |
 | The binary and CLI | The release tag | Pre-1.0: a minor bump may change flags or output |
 | Configuration | `schema_version` in the TOML | A new schema version is a breaking change and gets a new number |
-| Run report JSON | `schema_version` in the report | Additive fields may appear in a patch release; removals and type changes require a new version |
+| Run report JSON | `schema_version` in the report | Additive fields may appear in a patch release; removals and type changes require a new version. Pre-1.0 caveat: a field may also be renamed or its value vocabulary changed in a patch, called out in the changelog, because the alternative is carrying a known-wrong interface to 1.0 |
 | SQLite state | `PRAGMA user_version` | Upgraded only by `migrate-state`, never implicitly by `check` |
 
 Consequences worth knowing:

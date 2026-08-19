@@ -59,6 +59,14 @@ fails closed on anything it does not recognise, so a wider range would be a clai
 without evidence. Patch releases inside the range are tolerated because unknown
 response fields are ignored.
 
+Since 0.1.1 a different range can be configured, but only deliberately:
+`observation.allow_untested_adguard_version = true` is required alongside it, and
+every run then warns. That configuration is **Unsupported** in the sense this
+page uses the word — it is not tested and nothing here is claimed for it. The
+switch exists so that a new AdGuard Home minor release does not leave you with no
+option but to stop monitoring, and so that the untested choice is recorded in the
+configuration rather than made silently.
+
 ## Runtime dependencies
 
 A built binary has none beyond libc. Specifically:
