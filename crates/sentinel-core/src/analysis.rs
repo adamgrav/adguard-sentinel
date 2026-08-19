@@ -51,12 +51,17 @@ fn median(values: &[f64]) -> f64 {
     }
 }
 
+/// Both the failure and the available paths report the same condition id, so
+/// they must report the same kind. What differed between them moves to the
+/// verdict reason.
+const API_CONDITION_KIND: &str = "api";
+
 pub fn evaluate_target_failure(
     target: &TargetConfig,
     profile: &ConditionProfile,
     report: &TargetReport,
 ) -> Vec<ConditionEvaluation> {
-    let (kind, severity, sustain, summary) = match report.status {
+    let (reason, severity, sustain, summary) = match report.status {
         TargetStatus::AuthenticationRejected | TargetStatus::AuthenticationCooldown => (
             "authentication_rejected",
             Severity::Critical,
@@ -82,7 +87,7 @@ pub fn evaluate_target_failure(
             ),
         ),
         TargetStatus::Unavailable => (
-            "api_unavailable",
+            "unavailable",
             Severity::Warning,
             profile.api_unavailable_sustain_runs,
             format!("{} AdGuard API is unavailable", target.name),
@@ -92,10 +97,9 @@ pub fn evaluate_target_failure(
     vec![evaluation(
         format!("target:{}:api", target.id),
         Some(target.id.clone()),
-        kind,
+        API_CONDITION_KIND,
         severity,
-        EvaluationOutcome::Active,
-        summary,
+        Verdict::active(reason, summary),
         json!({ "complete": true }),
         json!({
             "status": report.status,
@@ -126,10 +130,12 @@ pub fn evaluate_target(
     evaluations.push(evaluation(
         format!("target:{}:api", target.id),
         Some(target.id.clone()),
-        "api",
+        API_CONDITION_KIND,
         Severity::Warning,
-        EvaluationOutcome::Clear,
-        format!("{} AdGuard API is available", target.name),
+        Verdict::clear(
+            "available",
+            format!("{} AdGuard API is available", target.name),
+        ),
         json!({ "complete": true }),
         json!({ "complete": true }),
         "GET /control/status and allowlisted observations",
@@ -140,10 +146,19 @@ pub fn evaluate_target(
     evaluations.push(boolean_evaluation(
         format!("target:{}:protection", target.id),
         target,
-        "protection_disabled",
+        "protection",
         Severity::Critical,
-        !operational.protection_enabled,
-        format!("{} AdGuard protection is disabled", target.name),
+        Verdict::from_flag(
+            !operational.protection_enabled,
+            (
+                "disabled",
+                format!("{} AdGuard protection is disabled", target.name),
+            ),
+            (
+                "enabled",
+                format!("{} AdGuard protection is enabled", target.name),
+            ),
+        ),
         policy.protection_enabled,
         operational.protection_enabled,
         "GET /control/status protection_enabled",
@@ -157,6 +172,7 @@ pub fn evaluate_target(
         operational.average_processing_seconds,
         profile.processing_latency_ms as f64 / 1_000.0,
         format!("{} DNS processing is persistently slow", target.name),
+        format!("{} DNS processing latency is within threshold", target.name),
         "GET /control/stats avg_processing_time",
         profile.processing_latency_sustain_runs,
         profile.recovery_runs,
@@ -168,6 +184,7 @@ pub fn evaluate_target(
         operational.maximum_upstream_seconds,
         profile.upstream_latency_ms as f64 / 1_000.0,
         format!("{} has a persistently slow upstream", target.name),
+        format!("{} upstream latency is within threshold", target.name),
         "GET /control/stats top_upstreams_avg_time",
         profile.upstream_latency_sustain_runs,
         profile.recovery_runs,
@@ -198,10 +215,19 @@ fn evaluate_dns_policy(
     evaluations.push(boolean_evaluation(
         format!("target:{}:upstream-mode", target.id),
         target,
-        "upstream_mode_drift",
+        "upstream_mode",
         Severity::Warning,
-        dns.upstream_mode != policy.upstream_mode,
-        format!("{} upstream mode differs from declared policy", target.name),
+        Verdict::from_flag(
+            dns.upstream_mode != policy.upstream_mode,
+            (
+                "drift",
+                format!("{} upstream mode differs from declared policy", target.name),
+            ),
+            (
+                "matches_policy",
+                format!("{} upstream mode matches declared policy", target.name),
+            ),
+        ),
         policy.upstream_mode.clone(),
         dns.upstream_mode.clone(),
         "GET /control/dns_info upstream_mode",
@@ -213,10 +239,19 @@ fn evaluate_dns_policy(
     evaluations.push(boolean_evaluation(
         format!("target:{}:upstream-set", target.id),
         target,
-        "upstream_set_drift",
+        "upstream_set",
         Severity::Warning,
-        expected != observed,
-        format!("{} upstream set differs from declared policy", target.name),
+        Verdict::from_flag(
+            expected != observed,
+            (
+                "drift",
+                format!("{} upstream set differs from declared policy", target.name),
+            ),
+            (
+                "matches_policy",
+                format!("{} upstream set matches declared policy", target.name),
+            ),
+        ),
         expected,
         observed,
         "GET /control/dns_info upstream_dns",
@@ -241,17 +276,25 @@ fn evaluate_filters(
     for required in &policy.filters {
         let id = short_hash(&required.url);
         let condition_id = format!("target:{}:filter:{id}", target.id);
-        let (active, kind, summary, observed_value) = match observed.get(required.url.as_str()) {
+        let matches_policy = || {
+            Verdict::clear(
+                "matches_policy",
+                format!("{} required filter matches declared policy", target.name),
+            )
+        };
+        let (verdict, observed_value) = match observed.get(required.url.as_str()) {
             None => (
-                true,
-                "required_filter_missing",
-                format!("{} is missing a required filter", target.name),
+                Verdict::active(
+                    "missing",
+                    format!("{} is missing a required filter", target.name),
+                ),
                 json!(null),
             ),
             Some(filter) if filter.enabled != required.enabled => (
-                true,
-                "required_filter_state_drift",
-                format!("{} has a required filter in the wrong state", target.name),
+                Verdict::active(
+                    "state_drift",
+                    format!("{} has a required filter in the wrong state", target.name),
+                ),
                 json!({ "enabled": filter.enabled, "last_updated": filter.last_updated }),
             ),
             Some(filter) if required.enabled => {
@@ -260,9 +303,14 @@ fn evaluate_filters(
                     .last_updated_unix_seconds
                     .is_none_or(|updated| now_unix_seconds.saturating_sub(updated) > maximum_age);
                 (
-                    stale,
-                    "required_filter_stale",
-                    format!("{} has a stale required filter", target.name),
+                    if stale {
+                        Verdict::active(
+                            "stale",
+                            format!("{} has a stale required filter", target.name),
+                        )
+                    } else {
+                        matches_policy()
+                    },
                     json!({
                         "enabled": filter.enabled,
                         "last_updated": filter.last_updated,
@@ -271,23 +319,16 @@ fn evaluate_filters(
                 )
             }
             Some(filter) => (
-                false,
-                "required_filter",
-                format!("{} required filter matches declared policy", target.name),
+                matches_policy(),
                 json!({ "enabled": filter.enabled, "last_updated": filter.last_updated }),
             ),
         };
         evaluations.push(evaluation(
             condition_id,
             Some(target.id.clone()),
-            kind,
+            "required_filter",
             Severity::Warning,
-            if active {
-                EvaluationOutcome::Active
-            } else {
-                EvaluationOutcome::Clear
-            },
-            summary,
+            verdict,
             json!({
                 "url": required.url,
                 "enabled": required.enabled,
@@ -312,12 +353,21 @@ fn evaluate_rewrites(
     evaluations.push(boolean_evaluation(
         format!("target:{}:rewrites-enabled", target.id),
         target,
-        "rewrite_settings_drift",
+        "rewrite_settings",
         Severity::Warning,
-        report.rewrites_enabled != Some(policy.rewrites.enabled),
-        format!(
-            "{} rewrite settings differ from declared policy",
-            target.name
+        Verdict::from_flag(
+            report.rewrites_enabled != Some(policy.rewrites.enabled),
+            (
+                "drift",
+                format!(
+                    "{} rewrite settings differ from declared policy",
+                    target.name
+                ),
+            ),
+            (
+                "matches_policy",
+                format!("{} rewrite settings match declared policy", target.name),
+            ),
         ),
         policy.rewrites.enabled,
         report.rewrites_enabled,
@@ -352,21 +402,22 @@ fn evaluate_rewrites(
                 short_hash(&format!("{}={}", key.0, key.1))
             ),
             Some(target.id.clone()),
-            "required_rewrite_drift",
+            "required_rewrite",
             Severity::Warning,
-            if active {
-                EvaluationOutcome::Active
-            } else {
-                EvaluationOutcome::Clear
-            },
-            if active {
-                format!(
-                    "{} is missing or has disabled a required rewrite",
-                    target.name
-                )
-            } else {
-                format!("{} required rewrite matches declared policy", target.name)
-            },
+            Verdict::from_flag(
+                active,
+                (
+                    "missing_or_disabled",
+                    format!(
+                        "{} is missing or has disabled a required rewrite",
+                        target.name
+                    ),
+                ),
+                (
+                    "matches_policy",
+                    format!("{} required rewrite matches declared policy", target.name),
+                ),
+            ),
             json!({ "domain": key.0, "answer": key.1, "enabled": required.enabled }),
             current.map_or(Value::Null, |rewrite| {
                 json!({
@@ -479,14 +530,19 @@ pub fn evaluate_aggregate(
         evaluations.push(evaluation(
             "aggregate:query-spike".to_owned(),
             None,
-            "combined_query_volume_anomaly",
+            "combined_query_volume",
             Severity::Warning,
-            if combined_queries as f64 > volume_limit {
-                EvaluationOutcome::Active
-            } else {
-                EvaluationOutcome::Clear
-            },
-            "Combined AdGuard query volume is anomalously high".to_owned(),
+            Verdict::from_flag(
+                combined_queries as f64 > volume_limit,
+                (
+                    "above_baseline",
+                    "Combined AdGuard query volume is anomalously high".to_owned(),
+                ),
+                (
+                    "within_baseline",
+                    "Combined AdGuard query volume is within baseline".to_owned(),
+                ),
+            ),
             json!({ "maximum": volume_limit, "same_hour_median": query_median }),
             json!({ "combined_queries": combined_queries }),
             "combined complete target statistics",
@@ -497,16 +553,20 @@ pub fn evaluate_aggregate(
         evaluations.push(evaluation(
             "aggregate:blocked-ratio".to_owned(),
             None,
-            "combined_blocked_ratio_anomaly",
+            "combined_blocked_ratio",
             Severity::Warning,
-            if combined_queries >= 100
-                && (combined_blocked_ratio - ratio_median).abs() > ratio_limit
-            {
-                EvaluationOutcome::Active
-            } else {
-                EvaluationOutcome::Clear
-            },
-            "Combined AdGuard blocked-query ratio is anomalous".to_owned(),
+            Verdict::from_flag(
+                combined_queries >= 100
+                    && (combined_blocked_ratio - ratio_median).abs() > ratio_limit,
+                (
+                    "outside_baseline",
+                    "Combined AdGuard blocked-query ratio is anomalous".to_owned(),
+                ),
+                (
+                    "within_baseline",
+                    "Combined AdGuard blocked-query ratio is within baseline".to_owned(),
+                ),
+            ),
             json!({
                 "maximum_absolute_deviation": ratio_limit,
                 "same_hour_median": ratio_median,
@@ -525,12 +585,12 @@ pub fn evaluate_aggregate(
         for (id, kind, summary) in [
             (
                 "aggregate:query-spike",
-                "combined_query_volume_anomaly",
+                "combined_query_volume",
                 "Combined query-volume baseline is still learning",
             ),
             (
                 "aggregate:blocked-ratio",
-                "combined_blocked_ratio_anomaly",
+                "combined_blocked_ratio",
                 "Combined blocked-ratio baseline is still learning",
             ),
         ] {
@@ -539,8 +599,7 @@ pub fn evaluate_aggregate(
                 None,
                 kind,
                 Severity::Warning,
-                EvaluationOutcome::NotEvaluated,
-                summary.to_owned(),
+                Verdict::not_evaluated("baseline_learning", summary.to_owned()),
                 json!({
                     "learning_days": config.learning_days,
                     "minimum_same_hour_samples": config.minimum_same_hour_samples,
@@ -584,13 +643,13 @@ pub fn advance_condition(
     state.last_observed_at = Some(observed_at.to_owned());
     let transition = match evaluation.outcome {
         EvaluationOutcome::Active => {
-            state.clear_count = 0;
-            state.active_count = state.active_count.saturating_add(1);
+            state.consecutive_clear = 0;
+            state.consecutive_active = state.consecutive_active.saturating_add(1);
             if state.first_observed_at.is_none() {
                 state.first_observed_at = Some(observed_at.to_owned());
             }
             if state.lifecycle != ConditionLifecycle::Firing
-                && state.active_count >= evaluation.sustain_runs
+                && state.consecutive_active >= evaluation.sustain_runs
             {
                 state.lifecycle = ConditionLifecycle::Firing;
                 state.last_transition_run = Some(run_id.to_owned());
@@ -613,9 +672,9 @@ pub fn advance_condition(
         }
         EvaluationOutcome::Clear => {
             let was_firing = state.lifecycle == ConditionLifecycle::Firing;
-            state.active_count = 0;
-            state.clear_count = state.clear_count.saturating_add(1);
-            if state.clear_count >= evaluation.recovery_runs {
+            state.consecutive_active = 0;
+            state.consecutive_clear = state.consecutive_clear.saturating_add(1);
+            if state.consecutive_clear >= evaluation.recovery_runs {
                 state.lifecycle = ConditionLifecycle::Clear;
                 state.first_observed_at = None;
                 if was_firing
@@ -652,8 +711,8 @@ pub fn advance_condition(
 }
 
 fn copy_state_to_evaluation(state: &ConditionState, evaluation: &mut ConditionEvaluation) {
-    evaluation.active_count = state.active_count;
-    evaluation.clear_count = state.clear_count;
+    evaluation.consecutive_active = state.consecutive_active;
+    evaluation.consecutive_clear = state.consecutive_clear;
     evaluation.lifecycle = state.lifecycle;
     evaluation.notification_state = state.alert_delivery_state;
     evaluation
@@ -667,7 +726,8 @@ fn threshold_evaluation(
     kind: &str,
     observed: f64,
     maximum: f64,
-    summary: String,
+    active_summary: String,
+    clear_summary: String,
     evidence: &str,
     sustain_runs: u32,
     recovery_runs: u32,
@@ -677,12 +737,11 @@ fn threshold_evaluation(
         Some(target.id.clone()),
         kind,
         Severity::Warning,
-        if observed > maximum {
-            EvaluationOutcome::Active
-        } else {
-            EvaluationOutcome::Clear
-        },
-        summary,
+        Verdict::from_flag(
+            observed > maximum,
+            ("above_threshold", active_summary),
+            ("within_threshold", clear_summary),
+        ),
         json!({ "maximum_seconds": maximum, "comparison": "strictly_greater" }),
         json!({ "seconds": observed }),
         evidence,
@@ -697,8 +756,7 @@ fn boolean_evaluation<E: serde::Serialize, O: serde::Serialize>(
     target: &TargetConfig,
     kind: &str,
     severity: Severity,
-    active: bool,
-    summary: String,
+    verdict: Verdict,
     expected: E,
     observed: O,
     evidence: &str,
@@ -710,12 +768,7 @@ fn boolean_evaluation<E: serde::Serialize, O: serde::Serialize>(
         Some(target.id.clone()),
         kind,
         severity,
-        if active {
-            EvaluationOutcome::Active
-        } else {
-            EvaluationOutcome::Clear
-        },
-        summary,
+        verdict,
         serde_json::to_value(expected).expect("serializing expected value cannot fail"),
         serde_json::to_value(observed).expect("serializing observed value cannot fail"),
         evidence,
@@ -725,13 +778,63 @@ fn boolean_evaluation<E: serde::Serialize, O: serde::Serialize>(
     )
 }
 
+/// The part of an evaluation that varies from run to run.
+///
+/// `kind` names what was checked and is stable for a given condition id. A
+/// `Verdict` says what the check found this time: the outcome, a machine
+/// `reason` for the specific divergence, and a summary phrased to match the
+/// outcome rather than always phrased as the failure.
+#[derive(Debug)]
+struct Verdict {
+    outcome: EvaluationOutcome,
+    reason: &'static str,
+    summary: String,
+}
+
+impl Verdict {
+    fn active(reason: &'static str, summary: String) -> Self {
+        Self {
+            outcome: EvaluationOutcome::Active,
+            reason,
+            summary,
+        }
+    }
+
+    fn clear(reason: &'static str, summary: String) -> Self {
+        Self {
+            outcome: EvaluationOutcome::Clear,
+            reason,
+            summary,
+        }
+    }
+
+    fn not_evaluated(reason: &'static str, summary: String) -> Self {
+        Self {
+            outcome: EvaluationOutcome::NotEvaluated,
+            reason,
+            summary,
+        }
+    }
+
+    fn from_flag(
+        active: bool,
+        when_active: (&'static str, String),
+        when_clear: (&'static str, String),
+    ) -> Self {
+        if active {
+            Self::active(when_active.0, when_active.1)
+        } else {
+            Self::clear(when_clear.0, when_clear.1)
+        }
+    }
+}
+
 fn evaluation(
     id: String,
     target_id: Option<String>,
     kind: &str,
     severity: Severity,
-    outcome: EvaluationOutcome,
-    summary: String,
+    verdict: Verdict,
     expected: Value,
     observed: Value,
     evidence_source: &str,
@@ -743,17 +846,18 @@ fn evaluation(
         id,
         target_id,
         kind: kind.to_owned(),
+        reason: verdict.reason.to_owned(),
         severity,
-        outcome,
-        summary,
+        outcome: verdict.outcome,
+        summary: verdict.summary,
         expected,
         observed,
         evidence_source: evidence_source.to_owned(),
         observation_complete,
         sustain_runs,
         recovery_runs,
-        active_count: 0,
-        clear_count: 0,
+        consecutive_active: 0,
+        consecutive_clear: 0,
         lifecycle: ConditionLifecycle::Clear,
         notification_state: AlertDeliveryState::Never,
         first_observed_at: None,
@@ -797,6 +901,7 @@ mod tests {
             id: "target:a:test".to_owned(),
             target_id: Some("a".to_owned()),
             kind: "test".to_owned(),
+            reason: "fixture".to_owned(),
             severity: Severity::Warning,
             outcome: EvaluationOutcome::Active,
             summary: "active".to_owned(),
@@ -806,8 +911,8 @@ mod tests {
             observation_complete: true,
             sustain_runs: 2,
             recovery_runs: 1,
-            active_count: 0,
-            clear_count: 0,
+            consecutive_active: 0,
+            consecutive_clear: 0,
             lifecycle: ConditionLifecycle::Clear,
             notification_state: AlertDeliveryState::Never,
             first_observed_at: None,
@@ -987,18 +1092,21 @@ mod tests {
         report.filters[0].last_updated_unix_seconds = Some(now - 72 * 3_600 - 1);
         let stale = super::evaluate_target(&target_config, &policy, &profile(), &report, now);
         assert!(stale.iter().any(|evaluation| {
-            evaluation.kind == "required_filter_stale"
+            evaluation.kind == "required_filter"
+                && evaluation.reason == "stale"
                 && evaluation.outcome == EvaluationOutcome::Active
         }));
         report.filters.clear();
         report.rewrites.clear();
         let missing = super::evaluate_target(&target_config, &policy, &profile(), &report, now);
         assert!(missing.iter().any(|evaluation| {
-            evaluation.kind == "required_filter_missing"
+            evaluation.kind == "required_filter"
+                && evaluation.reason == "missing"
                 && evaluation.outcome == EvaluationOutcome::Active
         }));
         assert!(missing.iter().any(|evaluation| {
-            evaluation.kind == "required_rewrite_drift"
+            evaluation.kind == "required_rewrite"
+                && evaluation.reason == "missing_or_disabled"
                 && evaluation.outcome == EvaluationOutcome::Active
         }));
     }
@@ -1041,7 +1149,7 @@ mod tests {
             super::evaluate_target(&target_config, &policy, &profile(), &report, 1_800_000_000);
         let protection = above
             .iter()
-            .find(|evaluation| evaluation.kind == "protection_disabled")
+            .find(|evaluation| evaluation.kind == "protection")
             .expect("protection");
         assert_eq!(protection.outcome, EvaluationOutcome::Active);
         assert_eq!(protection.sustain_runs, 2);
@@ -1137,7 +1245,7 @@ mod tests {
 
         let drift = evaluations
             .iter()
-            .find(|evaluation| evaluation.kind == "required_rewrite_drift")
+            .find(|evaluation| evaluation.kind == "required_rewrite")
             .expect("a required rewrite evaluation");
         assert_eq!(drift.outcome, EvaluationOutcome::Active);
         assert_eq!(drift.observed["enabled"], json!(false));
@@ -1165,7 +1273,7 @@ mod tests {
 
         let drift = evaluations
             .iter()
-            .find(|evaluation| evaluation.kind == "required_rewrite_drift")
+            .find(|evaluation| evaluation.kind == "required_rewrite")
             .expect("a required rewrite evaluation");
         assert_eq!(drift.outcome, EvaluationOutcome::Active);
         assert_eq!(drift.observed, json!(null));
@@ -1185,7 +1293,7 @@ mod tests {
         );
 
         assert_eq!(evaluations.len(), 1);
-        assert_eq!(evaluations[0].kind, "rewrite_settings_drift");
+        assert_eq!(evaluations[0].kind, "rewrite_settings");
         assert_eq!(evaluations[0].outcome, EvaluationOutcome::Clear);
     }
 
@@ -1205,7 +1313,7 @@ mod tests {
 
         let settings = evaluations
             .iter()
-            .find(|evaluation| evaluation.kind == "rewrite_settings_drift")
+            .find(|evaluation| evaluation.kind == "rewrite_settings")
             .expect("a rewrite settings evaluation");
         assert_eq!(settings.outcome, EvaluationOutcome::Active);
     }
@@ -1252,6 +1360,7 @@ mod tests {
             id: "target:a:test".to_owned(),
             target_id: Some("a".to_owned()),
             kind: "test".to_owned(),
+            reason: "fixture".to_owned(),
             severity: Severity::Warning,
             outcome: EvaluationOutcome::NotEvaluated,
             summary: "not evaluated".to_owned(),
@@ -1261,15 +1370,15 @@ mod tests {
             observation_complete: false,
             sustain_runs: 4,
             recovery_runs: 1,
-            active_count: 0,
-            clear_count: 0,
+            consecutive_active: 0,
+            consecutive_clear: 0,
             lifecycle: ConditionLifecycle::Clear,
             notification_state: AlertDeliveryState::Never,
             first_observed_at: None,
         };
         let mut state = ConditionState::from_evaluation(&evaluation);
         state.lifecycle = ConditionLifecycle::Firing;
-        state.active_count = 4;
+        state.consecutive_active = 4;
         state.alert_delivery_state = AlertDeliveryState::Delivered;
         let before = state.clone();
         assert!(
@@ -1283,8 +1392,241 @@ mod tests {
             .is_none()
         );
         assert_eq!(state.lifecycle, before.lifecycle);
-        assert_eq!(state.active_count, before.active_count);
+        assert_eq!(state.consecutive_active, before.consecutive_active);
         assert_eq!(state.alert_delivery_state, before.alert_delivery_state);
+    }
+
+    /// Latch continuity depends on the condition id and nothing else. Kind,
+    /// reason, and summary are presentation: editing any of them must not emit a
+    /// transition, restart the counters, or lose when the condition started. See
+    /// ADR 0010.
+    #[test]
+    fn presentation_changes_never_disturb_a_latch() {
+        let mut evaluation = ConditionEvaluation {
+            id: "target:a:filter:0123456789abcdef".to_owned(),
+            target_id: Some("a".to_owned()),
+            kind: "required_filter_stale".to_owned(),
+            reason: "unrecorded".to_owned(),
+            severity: Severity::Warning,
+            outcome: EvaluationOutcome::Active,
+            summary: "Resolver A has a stale required filter".to_owned(),
+            expected: json!({ "enabled": true }),
+            observed: json!({ "enabled": true }),
+            evidence_source: "fixture".to_owned(),
+            observation_complete: true,
+            sustain_runs: 2,
+            recovery_runs: 1,
+            consecutive_active: 0,
+            consecutive_clear: 0,
+            lifecycle: ConditionLifecycle::Clear,
+            notification_state: AlertDeliveryState::Never,
+            first_observed_at: None,
+        };
+        let mut state = ConditionState::from_evaluation(&evaluation);
+
+        // Two active runs to reach the sustain threshold, then delivery, which is
+        // what the notification layer records once Pushover confirms.
+        assert!(
+            advance_condition(
+                &mut state,
+                &mut evaluation,
+                "2026-01-01T00:00:00Z",
+                "1",
+                false
+            )
+            .is_none()
+        );
+        assert!(
+            advance_condition(
+                &mut state,
+                &mut evaluation,
+                "2026-01-01T00:05:00Z",
+                "2",
+                false
+            )
+            .is_some()
+        );
+        state.alert_delivery_state = AlertDeliveryState::Delivered;
+        assert_eq!(state.lifecycle, ConditionLifecycle::Firing);
+        let started = state.first_observed_at.clone();
+        assert!(started.is_some());
+
+        // The same condition, still active, now described differently.
+        evaluation.kind = "required_filter".to_owned();
+        evaluation.reason = "stale".to_owned();
+        evaluation.summary = "Resolver A required filter is stale".to_owned();
+
+        let transition = advance_condition(
+            &mut state,
+            &mut evaluation,
+            "2026-01-01T00:10:00Z",
+            "3",
+            false,
+        );
+
+        assert!(transition.is_none(), "renaming must not re-alert");
+        assert_eq!(state.lifecycle, ConditionLifecycle::Firing);
+        assert_eq!(state.alert_delivery_state, AlertDeliveryState::Delivered);
+        // The counter continues from where it was rather than restarting at one.
+        assert_eq!(state.consecutive_active, 3);
+        assert_eq!(state.first_observed_at, started);
+        // The new description is adopted, so state reflects the current release.
+        assert_eq!(state.kind, "required_filter");
+    }
+
+    /// Recorded from a live run before 0.1.1: one condition id reported
+    /// `required_filter_stale` on one run and `required_filter_state_drift` on
+    /// the next, so anything grouping by kind saw two conditions where there is
+    /// one. The kind names what was checked and may not vary with the outcome;
+    /// only the reason may.
+    #[test]
+    fn one_condition_id_keeps_one_kind_across_outcomes() {
+        let target_config = target_config();
+        let now = 1_800_000_000;
+        let url = "https://filters.invalid/required.txt";
+        let policy = PolicyConfig {
+            protection_enabled: true,
+            upstream_mode: "load_balance".to_owned(),
+            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            filters: vec![RequiredFilter {
+                url: url.to_owned(),
+                enabled: true,
+                maximum_age_hours: Some(72),
+            }],
+            rewrites: RequiredRewrites {
+                enabled: true,
+                required: Vec::new(),
+            },
+        };
+        let seen = FilterObservation {
+            url: url.to_owned(),
+            server_id: 1,
+            enabled: true,
+            rules_count: 100,
+            last_updated: Some("synthetic".to_owned()),
+            last_updated_unix_seconds: Some(now - 3_600),
+        };
+        let stale = FilterObservation {
+            last_updated_unix_seconds: Some(now - 72 * 3_600 - 1),
+            ..seen.clone()
+        };
+        let wrong_state = FilterObservation {
+            enabled: false,
+            ..seen.clone()
+        };
+
+        let mut ids = Vec::new();
+        let mut reasons = Vec::new();
+        for filters in [vec![seen], vec![stale], vec![wrong_state], Vec::new()] {
+            let mut report = target("a", 100, 10);
+            report.filters = filters;
+            let filter = super::evaluate_target(&target_config, &policy, &profile(), &report, now)
+                .into_iter()
+                .find(|evaluation| evaluation.id.contains(":filter:"))
+                .expect("a required filter evaluation");
+            assert_eq!(filter.kind, "required_filter");
+            ids.push(filter.id);
+            reasons.push(filter.reason);
+        }
+        assert!(
+            ids.windows(2).all(|pair| pair[0] == pair[1]),
+            "ids: {ids:?}"
+        );
+        reasons.sort();
+        reasons.dedup();
+        assert_eq!(reasons.len(), 4, "one reason per divergence");
+
+        // The API condition shares one id between the reachable path and every
+        // way of failing, so it must share one kind too.
+        let mut unavailable = target("a", 100, 10);
+        unavailable.status = TargetStatus::Unavailable;
+        unavailable.complete = false;
+        unavailable.operational = None;
+        let api = |report: &TargetReport| {
+            super::evaluate_target(&target_config, &policy, &profile(), report, now)
+                .into_iter()
+                .find(|evaluation| evaluation.id == "target:a:api")
+                .expect("an api evaluation")
+        };
+        let down = api(&unavailable);
+        let up = api(&target("a", 100, 10));
+        assert_eq!(down.kind, up.kind);
+        assert_eq!(down.reason, "unavailable");
+        assert_eq!(up.reason, "available");
+    }
+
+    /// Also recorded live: clear rows asserted the failure, so a passing filter
+    /// 1.9 hours old read as "has a stale required filter" against a 72 hour
+    /// limit. A summary states what the outcome is, never what it would have
+    /// been.
+    #[test]
+    fn a_clear_evaluation_reads_as_the_pass() {
+        let now = 1_800_000_000;
+        let url = "https://filters.invalid/required.txt";
+        let policy = PolicyConfig {
+            protection_enabled: true,
+            upstream_mode: "load_balance".to_owned(),
+            upstream_dns: vec!["tls://resolver.invalid".to_owned()],
+            filters: vec![RequiredFilter {
+                url: url.to_owned(),
+                enabled: true,
+                maximum_age_hours: Some(72),
+            }],
+            rewrites: RequiredRewrites {
+                enabled: true,
+                required: vec![RequiredRewrite {
+                    domain: "required.invalid".to_owned(),
+                    answer: "192.0.2.10".to_owned(),
+                    enabled: true,
+                }],
+            },
+        };
+        let mut report = target("a", 100, 10);
+        report.filters = vec![FilterObservation {
+            url: url.to_owned(),
+            server_id: 1,
+            enabled: true,
+            rules_count: 100,
+            last_updated: Some("synthetic".to_owned()),
+            last_updated_unix_seconds: Some(now - 3_600),
+        }];
+        report.rewrites = vec![RewriteObservation {
+            domain: "required.invalid".to_owned(),
+            answer: "192.0.2.10".to_owned(),
+            enabled: true,
+        }];
+
+        let evaluations =
+            super::evaluate_target(&target_config(), &policy, &profile(), &report, now);
+
+        assert!(!evaluations.is_empty());
+        for evaluation in &evaluations {
+            assert_eq!(
+                evaluation.outcome,
+                EvaluationOutcome::Clear,
+                "{} should be clear",
+                evaluation.id
+            );
+            let summary = evaluation.summary.to_ascii_lowercase();
+            for phrase in [
+                "stale",
+                "disabled",
+                "differ",
+                "missing",
+                "slow",
+                "failed",
+                "unsupported",
+                "anomalous",
+                "wrong",
+            ] {
+                assert!(
+                    !summary.contains(phrase),
+                    "clear evaluation {} reads as the failure: {}",
+                    evaluation.id,
+                    evaluation.summary
+                );
+            }
+        }
     }
 
     fn target_config() -> TargetConfig {

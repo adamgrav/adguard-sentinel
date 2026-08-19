@@ -26,7 +26,7 @@ pub enum StoreError {
     MissingParent(PathBuf),
     #[error("state parent directory does not exist: {0}")]
     ParentMissing(PathBuf),
-    #[error("cannot open or use state database: {0}")]
+    #[error("cannot open or use state database")]
     Sqlite(#[from] rusqlite::Error),
     #[error("state schema version {observed} is unsupported; expected {expected}")]
     UnsupportedVersion { observed: i64, expected: i64 },
@@ -36,7 +36,7 @@ pub enum StoreError {
     Permissions(std::io::Error),
     #[error("state contains invalid serialized data: {0}")]
     InvalidData(String),
-    #[error("cannot read state-adjacent data: {0}")]
+    #[error("cannot read state-adjacent data")]
     Io(#[from] std::io::Error),
 }
 
@@ -962,8 +962,10 @@ fn load_condition_state(
                 lifecycle: decode(&row.3)?,
                 first_observed_at: row.4,
                 last_observed_at: row.5,
-                active_count: u32_from_i64(row.6, "active count")?,
-                clear_count: u32_from_i64(row.7, "clear count")?,
+                // The state schema pins these column names; the model spells
+                // the same values consecutive_active and consecutive_clear.
+                consecutive_active: u32_from_i64(row.6, "active count")?,
+                consecutive_clear: u32_from_i64(row.7, "clear count")?,
                 alert_delivery_state: decode(&row.8)?,
                 last_transition_run: row.9,
             })
@@ -1000,8 +1002,8 @@ pub(crate) fn upsert_condition_state(
             encode(state.lifecycle)?,
             state.first_observed_at,
             state.last_observed_at,
-            i64::from(state.active_count),
-            i64::from(state.clear_count),
+            i64::from(state.consecutive_active),
+            i64::from(state.consecutive_clear),
             encode(state.alert_delivery_state)?,
             state.last_transition_run,
         ],

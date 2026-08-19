@@ -18,7 +18,7 @@ const SUPPORTED_ADGUARD_REQUIREMENT: &str = ">=0.107.78,<0.108.0";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("cannot inspect configuration {path}: {source}")]
+    #[error("cannot inspect configuration {path}")]
     Inspect {
         path: PathBuf,
         source: std::io::Error,
@@ -29,12 +29,12 @@ pub enum ConfigError {
         size: u64,
         maximum: u64,
     },
-    #[error("cannot read configuration {path}: {source}")]
+    #[error("cannot read configuration {path}")]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("configuration is not valid TOML: {0}")]
+    #[error("configuration is not valid TOML")]
     Decode(#[from] toml::de::Error),
     #[error("configuration validation failed:\n- {0}")]
     Validation(String),
@@ -70,6 +70,13 @@ pub struct ObservationConfig {
     pub target_concurrency: usize,
     pub minimum_complete_targets: usize,
     pub adguard_version_requirement: String,
+    /// Accept an `adguard_version_requirement` outside the range this release
+    /// has recorded evidence for. Defaults to false, so the tested range is
+    /// what you get unless you say otherwise. An accepted untested range is
+    /// still enforced at the request boundary; only the choice of range is
+    /// widened, never the strictness of the check.
+    #[serde(default)]
+    pub allow_untested_adguard_version: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -258,9 +265,12 @@ impl Config {
             errors.push(
                 "observation.adguard_version_requirement is not a semver requirement".to_owned(),
             );
-        } else if self.observation.adguard_version_requirement != SUPPORTED_ADGUARD_REQUIREMENT {
+        } else if self.uses_untested_adguard_version()
+            && !self.observation.allow_untested_adguard_version
+        {
             errors.push(format!(
-                "observation.adguard_version_requirement must be {SUPPORTED_ADGUARD_REQUIREMENT:?} for MVP v1"
+                "observation.adguard_version_requirement is {:?}, but only {SUPPORTED_ADGUARD_REQUIREMENT:?} has recorded evidence; set observation.allow_untested_adguard_version = true to accept an untested range",
+                self.observation.adguard_version_requirement
             ));
         }
         if self.behavioral_baseline.time_zone.trim().is_empty() {
@@ -285,6 +295,18 @@ impl Config {
         }
     }
 
+    /// True when the configured `AdGuard` version requirement is not the range
+    /// this release has recorded evidence for. Says nothing about whether the
+    /// requirement was accepted; `validate` decides that.
+    pub fn uses_untested_adguard_version(&self) -> bool {
+        self.observation.adguard_version_requirement != SUPPORTED_ADGUARD_REQUIREMENT
+    }
+
+    /// The version requirement this release has recorded evidence for.
+    pub fn supported_adguard_version_requirement() -> &'static str {
+        SUPPORTED_ADGUARD_REQUIREMENT
+    }
+
     pub fn fingerprint(&self) -> String {
         let serialized = serde_json::to_vec(self).expect("serializing Config cannot fail");
         let digest = Sha256::digest(serialized);
@@ -301,29 +323,63 @@ fn validate_profiles(profiles: &BTreeMap<String, ConditionProfile>, errors: &mut
             errors.push(format!("condition profile id {id:?} is not a stable slug"));
         }
         let counts = [
-            profile.authentication_rejected_sustain_runs,
-            profile.api_unavailable_sustain_runs,
-            profile.invalid_response_sustain_runs,
-            profile.unsupported_version_sustain_runs,
-            profile.protection_disabled_sustain_runs,
-            profile.processing_latency_sustain_runs,
-            profile.upstream_latency_sustain_runs,
-            profile.policy_drift_sustain_runs,
-            profile.behavioral_anomaly_sustain_runs,
-            profile.recovery_runs,
+            (
+                "authentication_rejected_sustain_runs",
+                profile.authentication_rejected_sustain_runs,
+            ),
+            (
+                "api_unavailable_sustain_runs",
+                profile.api_unavailable_sustain_runs,
+            ),
+            (
+                "invalid_response_sustain_runs",
+                profile.invalid_response_sustain_runs,
+            ),
+            (
+                "unsupported_version_sustain_runs",
+                profile.unsupported_version_sustain_runs,
+            ),
+            (
+                "protection_disabled_sustain_runs",
+                profile.protection_disabled_sustain_runs,
+            ),
+            (
+                "processing_latency_sustain_runs",
+                profile.processing_latency_sustain_runs,
+            ),
+            (
+                "upstream_latency_sustain_runs",
+                profile.upstream_latency_sustain_runs,
+            ),
+            (
+                "policy_drift_sustain_runs",
+                profile.policy_drift_sustain_runs,
+            ),
+            (
+                "behavioral_anomaly_sustain_runs",
+                profile.behavioral_anomaly_sustain_runs,
+            ),
+            ("recovery_runs", profile.recovery_runs),
         ];
-        if counts.iter().any(|count| !(1_u32..=1_000).contains(count)) {
-            errors.push(format!(
-                "condition profile {id:?} counts must be between 1 and 1000"
-            ));
+        for (label, count) in counts {
+            if !(1_u32..=1_000).contains(&count) {
+                errors.push(format!(
+                    "condition profile {id:?} {label} must be between 1 and 1000, got {count}"
+                ));
+            }
         }
-        if profile.authentication_retry_seconds == 0
-            || profile.processing_latency_ms == 0
-            || profile.upstream_latency_ms == 0
-        {
-            errors.push(format!(
-                "condition profile {id:?} durations must be positive"
-            ));
+        let durations = [
+            (
+                "authentication_retry_seconds",
+                profile.authentication_retry_seconds,
+            ),
+            ("processing_latency_ms", profile.processing_latency_ms),
+            ("upstream_latency_ms", profile.upstream_latency_ms),
+        ];
+        for (label, duration) in durations {
+            if duration == 0 {
+                errors.push(format!("condition profile {id:?} {label} must be positive"));
+            }
         }
     }
 }
@@ -356,7 +412,8 @@ fn validate_policies(policies: &BTreeMap<String, PolicyConfig>, errors: &mut Vec
         for filter in &policy.filters {
             if Url::parse(&filter.url).is_err() || !filter_urls.insert(filter.url.as_str()) {
                 errors.push(format!(
-                    "policy {id:?} has an invalid or duplicate filter URL"
+                    "policy {id:?} has an invalid or duplicate filter URL {:?}",
+                    filter.url
                 ));
             }
             if filter.enabled && filter.maximum_age_hours.is_none_or(|hours| hours == 0) {
@@ -378,8 +435,11 @@ fn validate_policies(policies: &BTreeMap<String, PolicyConfig>, errors: &mut Vec
                 normalize_dns_name(&rewrite.domain),
                 normalize_rewrite_answer(&rewrite.answer),
             );
-            if key.0.is_empty() || key.1.is_empty() || !rewrites.insert(key) {
-                errors.push(format!("policy {id:?} has an invalid or duplicate rewrite"));
+            if key.0.is_empty() || key.1.is_empty() || !rewrites.insert(key.clone()) {
+                errors.push(format!(
+                    "policy {id:?} has an invalid or duplicate rewrite {:?} -> {:?}",
+                    rewrite.domain, rewrite.answer
+                ));
             }
         }
     }
@@ -405,15 +465,18 @@ fn validate_targets(config: &Config, check_secret_files: bool, errors: &mut Vec<
             errors.push(format!("target {:?} username must not be empty", target.id));
         }
         if !config.policies.contains_key(&target.policy) {
-            errors.push(format!("target {:?} references unknown policy", target.id));
+            errors.push(format!(
+                "target {:?} references unknown policy {:?}",
+                target.id, target.policy
+            ));
         }
         if !config
             .condition_profiles
             .contains_key(&target.condition_profile)
         {
             errors.push(format!(
-                "target {:?} references unknown condition profile",
-                target.id
+                "target {:?} references unknown condition profile {:?}",
+                target.id, target.condition_profile
             ));
         }
         validate_target_url(target, errors);
@@ -428,11 +491,21 @@ fn validate_targets(config: &Config, check_secret_files: bool, errors: &mut Vec<
     }
     let configured_ids: BTreeSet<_> = config.targets.iter().map(|target| &target.id).collect();
     let baseline_ids: BTreeSet<_> = config.behavioral_baseline.target_ids.iter().collect();
-    if baseline_ids.len() != config.behavioral_baseline.target_ids.len()
-        || baseline_ids.is_empty()
-        || !baseline_ids.is_subset(&configured_ids)
-    {
-        errors.push("behavioral_baseline.target_ids must be unique configured targets".to_owned());
+    if baseline_ids.is_empty() {
+        errors.push("behavioral_baseline.target_ids must not be empty".to_owned());
+    }
+    let mut seen_baseline_ids = BTreeSet::new();
+    for id in &config.behavioral_baseline.target_ids {
+        if !seen_baseline_ids.insert(id) {
+            errors.push(format!(
+                "behavioral_baseline.target_ids repeats target {id:?}"
+            ));
+        }
+    }
+    for id in baseline_ids.difference(&configured_ids) {
+        errors.push(format!(
+            "behavioral_baseline.target_ids references unknown target {id:?}"
+        ));
     }
     let baseline_profiles: BTreeSet<_> = config
         .targets

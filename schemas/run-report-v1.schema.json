@@ -91,12 +91,14 @@
     "ConditionEvaluation": {
       "additionalProperties": false,
       "properties": {
-        "active_count": {
+        "consecutive_active": {
+          "description": "Consecutive active runs, counted toward `sustain_runs`. Persisted in the\n`active_count` column, whose name the versioned state schema pins.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
-        "clear_count": {
+        "consecutive_clear": {
+          "description": "Consecutive clear runs, counted toward `recovery_runs`. Persisted in the\n`clear_count` column, whose name the versioned state schema pins.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -115,6 +117,7 @@
           "type": "string"
         },
         "kind": {
+          "description": "What was checked. Stable for a given `id` across runs and outcomes, so a\nconsumer can group by it.",
           "type": "string"
         },
         "lifecycle": {
@@ -130,6 +133,11 @@
         "outcome": {
           "$ref": "#/$defs/EvaluationOutcome"
         },
+        "reason": {
+          "default": "unrecorded",
+          "description": "What the check found this time. Varies with `outcome`, and is where the\nspecific divergence lives. Absent from reports persisted by 0.1.0, which\nread back as `unrecorded`.",
+          "type": "string"
+        },
         "recovery_runs": {
           "format": "uint32",
           "minimum": 0,
@@ -139,6 +147,7 @@
           "$ref": "#/$defs/Severity"
         },
         "summary": {
+          "description": "Human sentence chosen from `outcome`: a clear row reads as the pass, an\nactive row reads as the failure.",
           "type": "string"
         },
         "sustain_runs": {
@@ -165,8 +174,8 @@
         "observation_complete",
         "sustain_runs",
         "recovery_runs",
-        "active_count",
-        "clear_count",
+        "consecutive_active",
+        "consecutive_clear",
         "lifecycle",
         "notification_state"
       ],
@@ -313,6 +322,7 @@
           "type": "string"
         },
         "kind": {
+          "description": "What was checked. Stable for a given `id`; see `ConditionEvaluation`.",
           "type": "string"
         },
         "lifecycle": {
@@ -325,6 +335,11 @@
           "type": "boolean"
         },
         "observed": true,
+        "reason": {
+          "default": "unrecorded",
+          "description": "Why this finding is active. See `ConditionEvaluation::reason`.",
+          "type": "string"
+        },
         "severity": {
           "$ref": "#/$defs/Severity"
         },

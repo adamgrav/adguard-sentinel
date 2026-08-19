@@ -12,6 +12,7 @@ stats_lookback_ms = 3600000
 target_concurrency = 2
 minimum_complete_targets = 1
 adguard_version_requirement = ">=0.107.78,<0.108.0"
+allow_untested_adguard_version = false
 
 [behavioral_baseline]
 target_ids = ["resolver-a", "resolver-b"]

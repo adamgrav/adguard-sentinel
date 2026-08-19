@@ -160,7 +160,8 @@ async fn main() -> ExitCode {
 async fn execute(cli: Cli) -> Result<u8, CommandError> {
     match cli.command {
         Command::ValidateConfig { config } => {
-            Config::load(&config, true).map_err(CommandError::invocation)?;
+            let config = Config::load(&config, true).map_err(CommandError::invocation)?;
+            warn_untested_adguard_version(&config);
             println!("configuration is valid (schema version 1)");
             Ok(0)
         }
@@ -178,6 +179,18 @@ async fn execute(cli: Cli) -> Result<u8, CommandError> {
         } => report(&state, format, limit, since.as_deref()),
         Command::MigrateState { state } => migrate_state(&state),
         Command::PrintSchema { kind, version } => print_schema(kind, version),
+    }
+}
+
+/// An accepted untested `AdGuard Home` version range is a deliberate choice, so
+/// say so on every run rather than only when the configuration was validated.
+fn warn_untested_adguard_version(config: &Config) {
+    if config.uses_untested_adguard_version() {
+        tracing::warn!(
+            configured = %config.observation.adguard_version_requirement,
+            evidence_for = %Config::supported_adguard_version_requirement(),
+            "accepting an AdGuard Home version requirement with no recorded evidence behind it"
+        );
     }
 }
 
@@ -200,6 +213,7 @@ async fn check_with_sink(
     sink: Option<PushoverClient>,
 ) -> Result<u8, CommandError> {
     let config = Config::load(config_path, false).map_err(CommandError::invocation)?;
+    warn_untested_adguard_version(&config);
     let passwords = read_target_passwords(&config).map_err(CommandError::invocation)?;
     let started = clock.now();
     let now_unix_seconds = started.as_second();
@@ -715,8 +729,12 @@ fn output_reports(reports: &[RunReport], format: OutputFormat) -> anyhow::Result
                 }
                 for finding in &report.findings {
                     println!(
-                        "finding [{:?}/{:?}]: {}",
-                        finding.severity, finding.lifecycle, finding.summary
+                        "finding [{:?}/{:?}] {}/{}: {}",
+                        finding.severity,
+                        finding.lifecycle,
+                        finding.kind,
+                        finding.reason,
+                        finding.summary
                     );
                 }
             }
@@ -1069,7 +1087,7 @@ allow_insecure_local_http = false
             report
                 .findings
                 .iter()
-                .any(|finding| finding.kind == "upstream_mode_drift")
+                .any(|finding| { finding.kind == "upstream_mode" && finding.reason == "drift" })
         );
 
         let above_threshold = run(&harness, FailOn::Error).await.expect("run");

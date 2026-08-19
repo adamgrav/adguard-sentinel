@@ -174,6 +174,12 @@ pub struct AggregateObservation {
     pub top_client_share: BTreeMap<String, f64>,
 }
 
+/// Reports persisted by 0.1.0 carry no `reason`, so one is supplied rather than
+/// failing the read. Never produced by an evaluation.
+fn unrecorded_reason() -> String {
+    "unrecorded".to_owned()
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvaluationOutcome {
@@ -187,9 +193,18 @@ pub enum EvaluationOutcome {
 pub struct ConditionEvaluation {
     pub id: String,
     pub target_id: Option<String>,
+    /// What was checked. Stable for a given `id` across runs and outcomes, so a
+    /// consumer can group by it.
     pub kind: String,
+    /// What the check found this time. Varies with `outcome`, and is where the
+    /// specific divergence lives. Absent from reports persisted by 0.1.0, which
+    /// read back as `unrecorded`.
+    #[serde(default = "unrecorded_reason")]
+    pub reason: String,
     pub severity: Severity,
     pub outcome: EvaluationOutcome,
+    /// Human sentence chosen from `outcome`: a clear row reads as the pass, an
+    /// active row reads as the failure.
     pub summary: String,
     pub expected: Value,
     pub observed: Value,
@@ -197,8 +212,14 @@ pub struct ConditionEvaluation {
     pub observation_complete: bool,
     pub sustain_runs: u32,
     pub recovery_runs: u32,
-    pub active_count: u32,
-    pub clear_count: u32,
+    /// Consecutive active runs, counted toward `sustain_runs`. Persisted in the
+    /// `active_count` column, whose name the versioned state schema pins.
+    #[serde(alias = "active_count")]
+    pub consecutive_active: u32,
+    /// Consecutive clear runs, counted toward `recovery_runs`. Persisted in the
+    /// `clear_count` column, whose name the versioned state schema pins.
+    #[serde(alias = "clear_count")]
+    pub consecutive_clear: u32,
     pub lifecycle: ConditionLifecycle,
     pub notification_state: AlertDeliveryState,
     pub first_observed_at: Option<String>,
@@ -234,8 +255,8 @@ pub struct ConditionState {
     pub lifecycle: ConditionLifecycle,
     pub first_observed_at: Option<String>,
     pub last_observed_at: Option<String>,
-    pub active_count: u32,
-    pub clear_count: u32,
+    pub consecutive_active: u32,
+    pub consecutive_clear: u32,
     pub alert_delivery_state: AlertDeliveryState,
     pub last_transition_run: Option<String>,
 }
@@ -250,8 +271,8 @@ impl ConditionState {
             lifecycle: ConditionLifecycle::Clear,
             first_observed_at: None,
             last_observed_at: None,
-            active_count: 0,
-            clear_count: 0,
+            consecutive_active: 0,
+            consecutive_clear: 0,
             alert_delivery_state: AlertDeliveryState::Never,
             last_transition_run: None,
         }
@@ -263,7 +284,11 @@ impl ConditionState {
 pub struct Finding {
     pub id: String,
     pub target_id: Option<String>,
+    /// What was checked. Stable for a given `id`; see `ConditionEvaluation`.
     pub kind: String,
+    /// Why this finding is active. See `ConditionEvaluation::reason`.
+    #[serde(default = "unrecorded_reason")]
+    pub reason: String,
     pub severity: Severity,
     pub lifecycle: ConditionLifecycle,
     pub first_observed_at: Option<String>,
@@ -283,11 +308,12 @@ impl From<&ConditionEvaluation> for Finding {
             id: evaluation.id.clone(),
             target_id: evaluation.target_id.clone(),
             kind: evaluation.kind.clone(),
+            reason: evaluation.reason.clone(),
             severity: evaluation.severity,
             lifecycle: evaluation.lifecycle,
             first_observed_at: evaluation.first_observed_at.clone(),
-            consecutive_active: evaluation.active_count,
-            consecutive_clear: evaluation.clear_count,
+            consecutive_active: evaluation.consecutive_active,
+            consecutive_clear: evaluation.consecutive_clear,
             notification_state: evaluation.notification_state,
             summary: evaluation.summary.clone(),
             expected: evaluation.expected.clone(),
@@ -394,4 +420,80 @@ pub struct OutboxMessage {
     pub priority: i8,
     pub status: NotificationStatus,
     pub condition_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConditionEvaluation, EvaluationOutcome};
+
+    /// A 0.1.0 state database stores each evaluation as serialised JSON and
+    /// `report` reads it back, so a 0.1.1 binary meeting 0.1.0 rows must not
+    /// fail the read. The counters arrive under their old names and `reason` is
+    /// absent entirely.
+    #[test]
+    fn an_evaluation_persisted_by_0_1_0_still_reads() {
+        let persisted = r#"{
+            "id": "target:maxwell:filter:8d676d2e2236732b",
+            "target_id": "maxwell",
+            "kind": "required_filter_stale",
+            "severity": "warning",
+            "outcome": "clear",
+            "summary": "Maxwell has a stale required filter",
+            "expected": { "enabled": true, "maximum_age_hours": 72 },
+            "observed": { "enabled": true },
+            "evidence_source": "GET /control/filtering/status filters",
+            "observation_complete": true,
+            "sustain_runs": 4,
+            "recovery_runs": 1,
+            "active_count": 0,
+            "clear_count": 3,
+            "lifecycle": "clear",
+            "notification_state": "never",
+            "first_observed_at": null
+        }"#;
+
+        let evaluation: ConditionEvaluation =
+            serde_json::from_str(persisted).expect("a 0.1.0 evaluation must still deserialize");
+
+        assert_eq!(evaluation.consecutive_active, 0);
+        assert_eq!(evaluation.consecutive_clear, 3);
+        assert_eq!(evaluation.reason, "unrecorded");
+        assert_eq!(evaluation.outcome, EvaluationOutcome::Clear);
+        // History is reported as it was recorded, not retrospectively corrected.
+        assert_eq!(evaluation.kind, "required_filter_stale");
+        assert_eq!(evaluation.summary, "Maxwell has a stale required filter");
+    }
+
+    /// The new names are what a 0.1.1 report writes, so they must round-trip too.
+    #[test]
+    fn an_evaluation_round_trips_through_its_current_names() {
+        let persisted = r#"{
+            "id": "target:maxwell:filter:8d676d2e2236732b",
+            "target_id": "maxwell",
+            "kind": "required_filter",
+            "reason": "matches_policy",
+            "severity": "warning",
+            "outcome": "clear",
+            "summary": "Maxwell required filter matches declared policy",
+            "expected": {},
+            "observed": {},
+            "evidence_source": "GET /control/filtering/status filters",
+            "observation_complete": true,
+            "sustain_runs": 4,
+            "recovery_runs": 1,
+            "consecutive_active": 0,
+            "consecutive_clear": 3,
+            "lifecycle": "clear",
+            "notification_state": "never",
+            "first_observed_at": null
+        }"#;
+
+        let evaluation: ConditionEvaluation =
+            serde_json::from_str(persisted).expect("current shape");
+        let encoded = serde_json::to_string(&evaluation).expect("encode");
+        let again: ConditionEvaluation = serde_json::from_str(&encoded).expect("round trip");
+
+        assert_eq!(again.reason, "matches_policy");
+        assert_eq!(again.consecutive_clear, 3);
+    }
 }
