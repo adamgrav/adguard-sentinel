@@ -7,6 +7,22 @@ types and has a schema-version constant. Semantic validation additionally owns
 cross-references, uniqueness, absolute paths, HTTPS policy, bounds, whole-hour
 lookback, filter freshness, and secret-file checks.
 
+Only `schema_version` and `targets` are required at the root. `[state]`,
+`[observation]`, `[condition_profiles]`, and `[notifications]` carry generated
+defaults equal to `config.example.toml`; notifications default to disabled.
+`[behavioral_baseline]` is optional. A target defaults to Basic authentication
+for compatibility with pre-0.2 configurations, but `auth = "none"` requires no
+credential fields. A target policy and every field inside a declared policy are
+independently optional.
+
+`observation.target_concurrency` is a cap, not a required target count. Its
+default of two is valid with one target; the unused slot simply stays idle.
+
+These additions relax what version 1 accepts without removing or retyping an
+existing TOML value, so the configuration `schema_version` remains `1`.
+[`config.minimal.toml`](../config.minimal.toml) is the smallest complete example;
+[`config.example.toml`](../config.example.toml) remains the complete reference.
+
 ## Run report v1
 
 `schemas/run-report-v1.schema.json` is the public automation contract. JSON
@@ -18,6 +34,11 @@ identity. JSONL is a sequence of complete v1 report objects.
 
 `evaluations[]` records every condition that was checked. `findings[]` is the
 subset whose outcome is active. Both use one vocabulary:
+
+An omitted policy declaration is not a check and is therefore absent from
+`evaluations[]` entirely. It is never serialized as `clear` or
+`not_evaluated`; those outcomes both describe conditions that actually exist.
+See [ADR 0011](decisions/0011-omitted-policy-is-not-evaluated.md).
 
 | Field | Contract |
 | --- | --- |

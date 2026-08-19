@@ -18,7 +18,7 @@ Two ideas explain most confusing behaviour:
 | --- | --- | --- |
 | `0` | Observation completed | Normal, including when findings exist and `--fail-on` is `never` |
 | `1` | A finding met the `--fail-on` threshold | You raised `--fail-on` above `never` |
-| `2` | Invocation or configuration error | Bad configuration, bad flag, unreadable secret file |
+| `2` | Invocation or configuration error | Bad configuration, bad flag, unreadable referenced secret file |
 | `3` | Minimum complete target count was not met | Resolvers unreachable, rejecting authentication, or returning data that failed validation |
 | `4` | Notification delivery was not confirmed | Pushover rejected, was unreachable, or the outcome is ambiguous |
 | `5` | State persistence failed | State path, permissions, schema version, or a regressed clock |
@@ -34,7 +34,7 @@ Run with `--format json` and read `targets[].status` and `targets[].error_kind`.
 | Status | What happened | What to do |
 | --- | --- | --- |
 | `unavailable` | Connection refused, timed out, or a non-success HTTP status | Check reachability and `observation.request_timeout_ms`. A redirect also lands here: Sentinel does not follow redirects, so a proxy that redirects the API will fail |
-| `authentication_rejected` | The API returned 401 or 403 | Check the username and the contents of `password_file`. See the cooldown section below |
+| `authentication_rejected` | The API returned 401 or 403 | With `auth = "basic"`, check the username and `password_file`; with `auth = "none"`, confirm the resolver or reverse proxy really permits unauthenticated API access. See the cooldown section below |
 | `authentication_cooldown` | A previous rejection is still being backed off | Expected after a rejection. See below |
 | `unsupported_version` | The server is outside the configured `observation.adguard_version_requirement` | Only `>=0.107.78,<0.108.0` has recorded evidence. A different range can be configured, but it needs `observation.allow_untested_adguard_version = true` and it is untested. See below |
 | `invalid_response` | A response failed strict validation | See below |
@@ -46,7 +46,7 @@ not met, the run exits `3`. With independent resolvers, setting
 
 ## Authentication cooldown
 
-After a rejected password, Sentinel records a cooldown of
+After an HTTP 401 or 403, Sentinel records a cooldown of
 `condition_profiles.<name>.authentication_retry_seconds` and makes **no request
 at all** to that target until it expires. You will see:
 
@@ -54,10 +54,10 @@ at all** to that target until it expires. You will see:
 authentication retry is paused for 840 seconds
 ```
 
-This is deliberate: repeatedly retrying a bad credential can trip rate limits or
-account lockouts. The cooldown is cleared by the first complete observation, not
-by time alone, so after fixing the credential the next run past the window will
-resume and clear it.
+This is deliberate: repeatedly retrying a rejected request can trip rate limits
+or account lockouts. The cooldown is cleared by the first complete observation,
+not by time alone, so after fixing Basic credentials or the no-auth access policy
+the next run past the window will resume and clear it.
 
 To resume immediately, fix the credential and either wait out the window or start
 from a fresh state database.
@@ -127,7 +127,8 @@ again.
 
 Expected in all of these cases:
 
-- `notifications.provider = "disabled"`, the default in `config.example.toml`.
+- Notifications are omitted, or `notifications.provider = "disabled"`. Disabled
+  is the configuration default.
 - `--dry-run`, which never loads or sends notification credentials.
 - No condition crossed a transition this run. Sentinel notifies on *transitions*,
   not on every run in which a finding is present. A condition must stay active for
@@ -161,7 +162,12 @@ A resolution is only eligible after a **confirmed delivered** alert. If the aler
 was ambiguous or failed, no resolution is sent, because "resolved" is meaningless
 to someone who never received the alert.
 
-## Behavioural findings never fire
+## Behavioural rows are absent or never fire
+
+If `[behavioral_baseline]` is omitted, behavioural analysis is disabled:
+`aggregate` is null and the two aggregate conditions are absent from
+`evaluations[]`. Add the section from `config.example.toml` when you want the
+learned baseline.
 
 Query-volume and blocked-ratio findings need a learned baseline:
 `behavioral_baseline.learning_days` of history **and**
@@ -169,15 +175,20 @@ Query-volume and blocked-ratio findings need a learned baseline:
 Until then those conditions report as not-evaluated rather than clear, which is
 visible in `aggregate.baseline_ready` in the JSON report.
 
-A first deployment therefore has operational and policy findings active
-immediately, while behavioural findings wait out the learning window. Every
-member of `behavioral_baseline.target_ids` must have a complete observation for
-the aggregate to advance at all.
+With a configured baseline, operational and declared-policy findings are active
+immediately while behavioural findings wait out the learning window. Every member
+of `behavioral_baseline.target_ids` must have a complete observation for the
+aggregate to advance at all.
 
 ## Policy findings you did not expect
 
 Only *declared* policy is compared. Extra filters and rewrites that your
-configuration does not mention are ignored by design.
+configuration does not mention are ignored by design. A target with no `policy`
+has no policy rows. Inside a policy, each omitted field has no corresponding row;
+for example, omitting `upstream_dns` removes the `upstream_set` condition rather
+than reporting it as `clear`. This is the intended distinction between “not
+asked” and “checked and matched”; see
+[ADR 0011](decisions/0011-omitted-policy-is-not-evaluated.md).
 
 Findings are identified by a stable `kind` plus the `reason` that fired, so
 `upstream_mode` with `reason: "drift"` is one condition rather than a separate

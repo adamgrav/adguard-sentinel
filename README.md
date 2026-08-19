@@ -1,38 +1,56 @@
 # AdGuard Sentinel
 
-A read-only monitor for independent AdGuard Home resolvers. It watches whether
-they are healthy, whether they still match the policy you declared, and whether
-their traffic looks like it normally does — then tells you once, when something
-changes.
+A read-only monitor for one or more independent AdGuard Home resolvers. This is
+a complete configuration for one resolver with no authentication:
 
-It has no AdGuard mutation API, never reads query logs, and sends no telemetry.
+```toml
+schema_version = 1
+
+[[targets]]
+id = "resolver"
+name = "Home resolver"
+base_url = "https://resolver.example.invalid"
+auth = "none"
+```
+
+Save it as `config.toml`, replace the synthetic URL, and validate it without
+contacting the resolver:
+
+```sh
+adguard-sentinel validate-config --config config.toml
+```
+
+The omitted sections use the documented operational defaults, notifications are
+disabled, and policy and behavioural checks are off until you declare them. The
+complete reference remains [`config.example.toml`](config.example.toml), while
+[`config.minimal.toml`](config.minimal.toml) is the block above as a file.
+
+Sentinel has no AdGuard mutation API, never reads query logs, and sends no
+telemetry.
 
 ## The problem it solves
 
-If you run more than one AdGuard Home instance, two things go wrong quietly.
+Resolvers fail quietly. Protection can be disabled "just for a minute", a filter
+can stop updating, or an upstream can change without anything breaking loudly.
+A naive poller creates the opposite problem by paging on every transient failure
+until its alerts are ignored.
 
-The first is drift. Someone disables protection "just for a minute", a filter
-list stops updating, a DNS rewrite gets removed, an upstream is changed on one
-resolver but not the other. Nothing breaks loudly, and you find out weeks later.
-
-The second is alert fatigue. A naive monitor that pages on every failed poll
-trains you to ignore it, which is worse than no monitor at all.
-
-Sentinel addresses both. It compares each resolver against a policy you declare
-in configuration, requires a condition to persist before it alerts, alerts
-**once**, and then resolves quietly when the condition clears.
+Sentinel observes each resolver independently, lets you declare only the policy
+you care about, requires a condition to persist before it alerts, alerts
+**once**, and resolves quietly when the condition clears. One resolver is enough;
+an explicit group can add cross-resolver behavioural analysis when wanted.
 
 ## What it watches
 
-**Operational**, per resolver: API reachability, authentication, whether
-protection is enabled, whether the server version is supported, DNS processing
-latency, and per-upstream latency.
+**Operational**, per resolver: API reachability, authentication rejection,
+whether the server version is supported, DNS processing latency, and
+per-upstream latency.
 
-**Declared policy**, per resolver: upstream mode and the upstream set, required
-filter lists including whether they are enabled and how stale they are, required
-DNS rewrites, and the global rewrite setting. Filters and rewrites your
-configuration does not mention are ignored, so you declare what you care about
-rather than freezing the whole instance.
+**Declared policy**, per resolver and entirely optional: protection state,
+upstream mode, upstream set, required filter lists including whether they are
+enabled and how stale they are, required DNS rewrites, and the global rewrite
+setting. Each field is independent. Anything you omit produces no policy
+evaluation, rather than a misleading `clear` one.
 
 **Behaviour**, across an explicitly configured group: combined query volume and
 blocked ratio compared against a learned same-hour baseline, using a median and
@@ -52,9 +70,10 @@ These are the design, not a disclaimer. They are why the project is small.
 - **Invalid data fails closed.** A response that cannot be trusted makes the
   observation *incomplete*. It never becomes a healthy zero, `false`, or empty
   value — the failure mode that makes a monitor worse than useless.
-- **Credentials stay local.** Secrets are read from files, never arguments or the
-  environment. Outbound notifications carry condition summaries only; structured
-  evidence stays in local state.
+- **Credentials stay local.** Basic-auth and notification secrets are read from
+  files, never arguments or the environment. With `auth = "none"`, no
+  `Authorization` header is sent. Outbound notifications carry condition
+  summaries only; structured evidence stays in local state.
 - **Resolvers stay independent.** Observations, cooldowns, latches, and history
   are per resolver and never copied between them.
 - **No telemetry.** It contacts the resolvers you configure and, if enabled,
@@ -63,8 +82,10 @@ These are the design, not a disclaimer. They are why the project is small.
 ## Support
 
 Sentinel builds from source on `x86_64` Linux with Rust 1.97.1, and Nix provides
-the reproducible packaging path. Pushover is the only notification provider, and
-a systemd timer is the only supported scheduling method. AdGuard Home
+the reproducible packaging path for `x86_64-linux` and `aarch64-linux`. ARM Linux
+CI is configured but remains pending until it has a recorded green run. Pushover
+is the only notification provider, and a systemd timer is the only supported
+scheduling method. AdGuard Home
 `>=0.107.78,<0.108.0` is the supported API range; another range can be
 configured deliberately, but nothing here is claimed for it.
 
@@ -93,46 +114,64 @@ cargo build --locked --release
 install -Dm755 target/release/adguard-sentinel /usr/local/bin/adguard-sentinel
 ```
 
+Or install a tagged release directly from Git without a crates.io publication:
+
+```sh
+cargo install --locked --git https://github.com/adamgrav/adguard-sentinel --tag vX.Y.Z adguard-sentinel
+```
+
 A built binary needs no system SQLite, OpenSSL, or `tzdata` — all three are
 linked in. See [the deployment guide](docs/DEPLOYMENT.md) for details.
 
 ## Five-minute start
 
 ```sh
-# 1. Start from the example and edit it. Every value in it is synthetic.
-install -Dm600 config.example.toml /etc/adguard-sentinel/config.toml
+# 1. Start minimal. The URL is synthetic and must be replaced.
+install -Dm600 config.minimal.toml /etc/adguard-sentinel/config.toml
 
 # 2. Check the configuration. Touches no network service.
 adguard-sentinel validate-config --config /etc/adguard-sentinel/config.toml
 
-# 3. Take one observation, with notifications never loaded.
-adguard-sentinel check --config /etc/adguard-sentinel/config.toml --dry-run
+# 3. Give the dry run its own configuration and state database.
+cp /etc/adguard-sentinel/config.toml /tmp/adguard-sentinel-dry-run.toml
+printf '\n[state]\npath = "/tmp/adguard-sentinel-dry-run.sqlite"\nretention_days = 21\n' >> /tmp/adguard-sentinel-dry-run.toml
 
-# 4. Read what it found.
-adguard-sentinel report --state /var/lib/adguard-sentinel/state.sqlite --limit 1
+# 4. Take one observation, with notifications never loaded.
+adguard-sentinel check --config /tmp/adguard-sentinel-dry-run.toml --dry-run
+
+# 5. Read what it found.
+adguard-sentinel report --state /tmp/adguard-sentinel-dry-run.sqlite --limit 1
 ```
 
-Step 3 should exit `0` with every target complete and no unexpected findings. If
+Step 4 should exit `0` with every target complete and no unexpected findings. If
 it does not, [the troubleshooting guide](docs/TROUBLESHOOTING.md) is organised by
-exactly what you will see.
+exactly what you will see. The production configuration still uses the default
+`/var/lib/adguard-sentinel/state.sqlite`, so the dry-run database cannot advance
+live latches.
 
-Then install a systemd timer to run it every five minutes. The deployment guide
-has a hardened unit pair using `LoadCredential` and a private state directory.
+Then add only the policy, behavioural baseline, Basic authentication, or
+Pushover settings you want. Install a systemd timer to run it every five minutes;
+the deployment guide has a hardened unit pair with optional `LoadCredential`
+entries and a private state directory.
 
 ## Configure
 
-One TOML file, `schema_version = 1`. [`config.example.toml`](config.example.toml)
-is complete and commented by structure:
+One TOML file, `schema_version = 1`. Start from
+[`config.minimal.toml`](config.minimal.toml); use
+[`config.example.toml`](config.example.toml) when you need the complete reference.
+Omitting state, observation, condition profiles, or notifications selects the
+exact values shown in the complete example. Policy and behavioural analysis are
+opt-in.
 
-| Section | Purpose |
-| --- | --- |
-| `[state]` | Database path and retention |
-| `[observation]` | Timeouts, response-size limit, concurrency, and how many targets must be complete for the run to be healthy |
-| `[behavioral_baseline]` | Which targets form the behaviour group, its time zone, and its learning window |
-| `[condition_profiles.*]` | How many runs a condition must persist before alerting, recovery counts, and latency thresholds |
-| `[notifications]` | `disabled` or `pushover` |
-| `[policies.*]` | The declared policy: upstream mode and set, required filters, required rewrites |
-| `[[targets]]` | Each resolver, its credentials file, and which policy and profile it uses |
+| Section | Omission | Purpose |
+| --- | --- | --- |
+| `[state]` | Reference defaults | Database path and retention |
+| `[observation]` | Reference defaults | Timeouts, response-size limit, concurrency, and how many targets must be complete for the run to be healthy |
+| `[behavioral_baseline]` | Disabled | Optional behaviour group, time zone, and learning window |
+| `[condition_profiles.*]` | `current` reference profile | Sustain and recovery counts plus latency thresholds |
+| `[notifications]` | Disabled | `disabled` or `pushover` |
+| `[policies.*]` | No policy checks | Independently optional protection, upstream, filter, and rewrite declarations |
+| `[[targets]]` | Required | Resolver identity, base URL, auth mode, and optional policy/profile selection |
 
 `adguard-sentinel print-schema config --version 1` emits the JSON Schema, which
 is generated from the Rust types rather than hand-written.

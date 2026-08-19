@@ -12,6 +12,11 @@ a behavior change that must be reflected here and in the run-report schema:
   Upstream latency is the maximum validated per-upstream average and also uses
   a strict greater-than comparison.
 - Conditions that cannot be evaluated do not increment, clear, or resolve.
+- Only declared policy fields create policy conditions. An omitted target policy
+  or policy field is absent from `evaluations[]`; it is not clear or
+  not-evaluated.
+- Omitting `[behavioral_baseline]` produces no aggregate observation or
+  behavioural conditions.
 - Behavioral aggregation advances only after every declared group member has a
   complete observation.
 - The baseline requires the configured age and same-local-hour sample count.

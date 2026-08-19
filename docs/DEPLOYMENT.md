@@ -51,38 +51,68 @@ adguard-sentinel --help
 Keep `--locked`. It makes the build use the committed `Cargo.lock` instead of
 resolving newer dependency versions.
 
-## Configure
-
-Copy `config.example.toml` and edit it. Every value in that file is synthetic;
-the reserved `.invalid` names and RFC 5737 addresses must all be replaced.
+To install a tagged release directly without keeping a checkout:
 
 ```sh
-install -Dm600 config.example.toml /etc/adguard-sentinel/config.toml
+cargo install --locked --git https://github.com/adamgrav/adguard-sentinel --tag vX.Y.Z adguard-sentinel
+```
+
+This is a Git installation; Sentinel is not published to crates.io.
+
+## Configure
+
+Start with `config.minimal.toml` for one resolver without authentication. Its URL
+is synthetic and must be replaced. Use `config.example.toml` as the complete
+reference when adding Basic authentication, policy, behavioural analysis, or
+Pushover; every `.invalid` name and RFC 5737 address in it is synthetic.
+
+```sh
+install -Dm600 config.minimal.toml /etc/adguard-sentinel/config.toml
 adguard-sentinel validate-config --config /etc/adguard-sentinel/config.toml
 ```
 
 `validate-config` checks the schema, cross-references, URLs, bounds, and that
-every referenced secret file exists and is non-empty. It contacts no network
-service.
+every referenced Basic-auth or Pushover secret file exists and is non-empty. It
+contacts no network service. With `auth = "none"`, omit both `username` and
+`password_file`; Sentinel sends no `Authorization` header. Basic authentication
+keeps credentials file-only:
+
+```toml
+auth = "basic"
+username = "admin"
+password_file = "/run/credentials/adguard-sentinel.service/resolver-password"
+```
+
+The omitted state, observation, condition-profile, and notification sections use
+the values in `config.example.toml`. The behavioural baseline and every policy
+field are opt-in. A missing policy field creates no condition rather than a
+`clear` condition.
 
 Then take one real observation before installing any service. Use a **separate**
 state path for this, because a state database is permanently bound to live or
-dry-run use after its first run:
+dry-run use after its first run. Keep the production configuration untouched and
+append a temporary state section to a copy:
+
+```sh
+cp /etc/adguard-sentinel/config.toml /tmp/adguard-sentinel-dry-run.toml
+printf '\n[state]\npath = "/tmp/adguard-sentinel-dry-run.sqlite"\nretention_days = 21\n' >> /tmp/adguard-sentinel-dry-run.toml
+```
 
 ```sh
 adguard-sentinel check \
-  --config /etc/adguard-sentinel/config.toml \
+  --config /tmp/adguard-sentinel-dry-run.toml \
   --dry-run \
   --format json
 ```
 
 Note that `--dry-run` still performs real read-only requests against your
 resolvers and still writes to the state database it is pointed at. What it never
-does is load or send notification credentials.
+does is load or send notification credentials. The untouched production
+configuration continues to default to `/var/lib/adguard-sentinel/state.sqlite`.
 
 Acceptance for this step is exit zero, every target complete, supported server
-versions, the expected declared policy, no unexpected findings, and a readable
-persisted report.
+versions, every configured policy condition matching, no unexpected findings,
+and a readable persisted report.
 
 ## Run on a schedule with systemd
 
@@ -106,10 +136,6 @@ DynamicUser=yes
 StateDirectory=adguard-sentinel
 StateDirectoryMode=0700
 UMask=0077
-LoadCredential=resolver-a-password:/etc/adguard-sentinel/secrets/resolver-a-password
-LoadCredential=resolver-b-password:/etc/adguard-sentinel/secrets/resolver-b-password
-LoadCredential=pushover-application-token:/etc/adguard-sentinel/secrets/pushover-application-token
-LoadCredential=pushover-user-key:/etc/adguard-sentinel/secrets/pushover-user-key
 TimeoutStartSec=120
 
 CapabilityBoundingSet=
@@ -152,18 +178,24 @@ AccuracySec=30s
 WantedBy=timers.target
 ```
 
-`LoadCredential` exposes each secret read-only under
-`/run/credentials/adguard-sentinel.service/<id>`, so the configuration should
-point at those paths rather than at the files on disk:
+The unit above matches `config.minimal.toml`: no resolver or notification
+credentials are loaded. When Basic authentication or Pushover is configured,
+add one `LoadCredential` line per secret. `LoadCredential` exposes each secret
+read-only under `/run/credentials/adguard-sentinel.service/<id>`, so the
+configuration should point there rather than at the file on disk:
+
+```ini
+LoadCredential=resolver-password:/etc/adguard-sentinel/secrets/resolver-password
+```
 
 ```toml
-password_file = "/run/credentials/adguard-sentinel.service/resolver-a-password"
+password_file = "/run/credentials/adguard-sentinel.service/resolver-password"
 ```
 
 `StateDirectory=adguard-sentinel` gives the service a private
-`/var/lib/adguard-sentinel`, so set `state.path` to
-`/var/lib/adguard-sentinel/state.sqlite`. Sentinel creates the database with
-`0600` permissions.
+`/var/lib/adguard-sentinel`, matching the default
+`state.path = "/var/lib/adguard-sentinel/state.sqlite"`. Sentinel creates the
+database with `0600` permissions.
 
 Install and verify:
 

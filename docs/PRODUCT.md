@@ -12,8 +12,8 @@ notifications.
   remain independent.
 - Cross-resolver aggregation occurs only for an explicitly configured behavior
   group. It never implies clustering or synchronization.
-- Only declared policy is compared. Extra filters and UI-managed rewrites are
-  ignored.
+- Only declared policy is compared. An omitted policy field creates no
+  evaluation, and extra filters and UI-managed rewrites are ignored.
 - No AdGuard mutation method, arbitrary endpoint, query-log retrieval,
   synchronization, or remediation exists.
 - Missing or invalid required data makes an observation incomplete. It never
@@ -40,7 +40,7 @@ notifications.
 
 ## Success
 
-The product succeeds when multiple independent targets can be monitored without
-coupling their state, invalid external data fails closed, the AdGuard transport
-cannot express mutation, notification ambiguity is visible, and every runtime
-or deployment claim is backed by evidence from that environment.
+The product succeeds when one or more independent targets can be monitored
+without coupling their state, invalid external data fails closed, the AdGuard
+transport cannot express mutation, notification ambiguity is visible, and every
+runtime or deployment claim is backed by evidence from that environment.

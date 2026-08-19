@@ -893,15 +893,7 @@ policy = "home"
 
     #[test]
     fn one_no_auth_target_is_a_complete_minimal_configuration() {
-        let text = r#"
-schema_version = 1
-
-[[targets]]
-id = "resolver"
-name = "Resolver"
-base_url = "https://resolver.invalid"
-auth = "none"
-"#;
+        let text = include_str!("../../../config.minimal.toml");
         let config: Config = toml::from_str(text).expect("minimal configuration");
 
         config.validate(false).expect("minimal semantics");

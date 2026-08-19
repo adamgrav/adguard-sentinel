@@ -5,7 +5,44 @@ Notable changes to AdGuard Sentinel. The format follows
 
 ## Unreleased
 
-Nothing yet.
+Every configuration accepted by v0.1.3 remains valid and keeps the same target
+evaluations. The configuration schema stays at version 1 because the changes
+only make previously required declarations optional. The run-report schema and
+SQLite schema are unchanged; existing state opens without migration and the
+state-schema checksum is unchanged.
+
+### Added
+
+- Per-target `auth = "none"`, which loads no resolver credential and sends no
+  `Authorization` header. Omitted `auth` defaults to `basic`, preserving the
+  v0.1.3 behavior and its file-only password requirement.
+- [`config.minimal.toml`](config.minimal.toml), a one-resolver, no-auth
+  configuration with notifications disabled by default.
+- `aarch64-linux` flake outputs and a native GitHub Actions matrix job. The
+  platform remains marked **Pending** until that job has a recorded green run.
+- Documentation for direct tagged Git installation with Cargo; crates.io
+  publication remains disabled.
+
+### Changed
+
+- `[state]`, `[observation]`, `[condition_profiles]`, and `[notifications]` now
+  default to the values in the complete example. A target defaults to the
+  `current` condition profile and `allow_insecure_local_http = false`.
+- `[behavioral_baseline]` is optional. Omitting it produces no aggregate
+  observation or aggregate evaluation rows.
+- A target policy and every field within one are independently optional. An
+  omitted declaration produces no policy evaluation rather than a false
+  `clear`; [ADR 0011](docs/decisions/0011-omitted-policy-is-not-evaluated.md)
+  records the rule.
+- The README now starts with the minimal single-resolver configuration; the
+  complete example remains the reference for every setting.
+
+### Note when upgrading
+
+- `runs.config_sha256` changes on the first run even when a v0.1.3 configuration
+  file is byte-identical, because the fingerprint now includes the defaulted
+  `auth = "basic"` field. The fingerprint is audit metadata and is not compared
+  across runs.
 
 ## 0.1.3 — 2026-08-19
 
