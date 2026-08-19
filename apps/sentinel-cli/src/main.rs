@@ -321,25 +321,30 @@ async fn check_with_sink(
         ));
     }
 
-    let (local_hour, utc_offset_minutes) =
-        local_time_bucket(started, &config.behavioral_baseline.time_zone).map_err(|error| {
-            CommandError::invocation(anyhow!("invalid behavior time zone: {error}"))
-        })?;
     let cutoff_unix_seconds =
         now_unix_seconds.saturating_sub(i64::from(config.state.retention_days) * 86_400);
-    let baseline_samples = store
-        .load_baseline_samples(cutoff_unix_seconds)
-        .map_err(CommandError::state)?;
-    let aggregate_profile = baseline_profile(&config).map_err(CommandError::invocation)?;
-    let aggregate_evaluation = evaluate_aggregate(
-        &config.behavioral_baseline,
-        aggregate_profile,
-        &baseline_samples,
-        &targets,
-        now_unix_seconds,
-        local_hour,
-        utc_offset_minutes,
-    );
+    let aggregate_evaluation = if let Some(baseline) = &config.behavioral_baseline {
+        let (local_hour, utc_offset_minutes) = local_time_bucket(started, &baseline.time_zone)
+            .map_err(|error| {
+                CommandError::invocation(anyhow!("invalid behavior time zone: {error}"))
+            })?;
+        let baseline_samples = store
+            .load_baseline_samples(cutoff_unix_seconds)
+            .map_err(CommandError::state)?;
+        let aggregate_profile =
+            baseline_profile(&config, baseline).map_err(CommandError::invocation)?;
+        evaluate_aggregate(
+            baseline,
+            aggregate_profile,
+            &baseline_samples,
+            &targets,
+            now_unix_seconds,
+            local_hour,
+            utc_offset_minutes,
+        )
+    } else {
+        None
+    };
     let aggregate = aggregate_evaluation
         .as_ref()
         .map(|value| value.observation.clone());
@@ -658,9 +663,11 @@ fn incomplete_report(target: &sentinel_core::TargetConfig, error: &AdGuardError)
     )
 }
 
-fn baseline_profile(config: &Config) -> anyhow::Result<&sentinel_core::ConditionProfile> {
-    let first = config
-        .behavioral_baseline
+fn baseline_profile<'config>(
+    config: &'config Config,
+    baseline: &sentinel_core::config::BehavioralBaselineConfig,
+) -> anyhow::Result<&'config sentinel_core::ConditionProfile> {
+    let first = baseline
         .target_ids
         .first()
         .ok_or_else(|| anyhow!("behavioral target group is empty"))?;
@@ -1043,6 +1050,19 @@ allow_insecure_local_http = false
             .expect("one persisted report")
     }
 
+    fn omit_behavioral_baseline(harness: &Harness) {
+        let text = fs::read_to_string(&harness.config_path).expect("config");
+        let baseline = r#"[behavioral_baseline]
+target_ids = ["resolver-a"]
+time_zone = "Europe/Amsterdam"
+learning_days = 7
+minimum_same_hour_samples = 36
+"#;
+        assert!(text.contains(baseline));
+        fs::write(&harness.config_path, text.replace(baseline, ""))
+            .expect("config without baseline");
+    }
+
     #[tokio::test]
     async fn a_healthy_run_exits_zero_without_findings() {
         let server = MockServer::start_async().await;
@@ -1068,6 +1088,34 @@ allow_insecure_local_http = false
         assert!(report.transitions.is_empty());
         assert!(report.health.met);
         assert_eq!(report.exit.reason, "observation completed");
+        for mock in mocks {
+            mock.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_omitted_behavioral_baseline_produces_no_aggregate_evaluations() {
+        let server = MockServer::start_async().await;
+        let mocks = serve_golden(&server).await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+        omit_behavioral_baseline(&harness);
+
+        let code = run(&harness, FailOn::Never).await.expect("healthy run");
+
+        assert_eq!(code, 0);
+        let report = latest_report(&harness);
+        assert!(report.aggregate.is_none());
+        assert!(
+            report
+                .evaluations
+                .iter()
+                .all(|evaluation| !evaluation.id.starts_with("aggregate:"))
+        );
         for mock in mocks {
             mock.assert_calls_async(1).await;
         }
