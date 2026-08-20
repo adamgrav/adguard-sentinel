@@ -1051,6 +1051,12 @@ allow_insecure_local_http = false
             .expect("one persisted report")
     }
 
+    fn rewrite_config(harness: &Harness, from: &str, to: &str) {
+        let text = fs::read_to_string(&harness.config_path).expect("config");
+        assert!(text.contains(from), "config does not contain {from:?}");
+        fs::write(&harness.config_path, text.replace(from, to)).expect("rewritten config");
+    }
+
     fn omit_behavioral_baseline(harness: &Harness) {
         let text = fs::read_to_string(&harness.config_path).expect("config");
         let baseline = r#"[behavioral_baseline]
@@ -1226,6 +1232,69 @@ minimum_same_hour_samples = 36
 
         let above_threshold = run(&harness, FailOn::Error).await.expect("run");
         assert_eq!(above_threshold, 0);
+    }
+
+    /// ADR 0011: withdrawing a declaration is not a recovery. The condition
+    /// disappears from the report, but its latch is neither resolved nor reset,
+    /// so restoring the declaration resumes the retained state rather than
+    /// alerting a second time.
+    #[tokio::test]
+    async fn a_withdrawn_declaration_retains_its_latch_instead_of_resolving() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+        let declaration = format!("upstream_mode = \"{DRIFTED_MODE}\"\n");
+
+        run_at(&harness, "2027-01-15T08:00:00Z")
+            .await
+            .expect("alert run");
+        let alerted = latest_report(&harness);
+        assert_eq!(alerted.transitions.len(), 1);
+        assert_eq!(alerted.transitions[0].kind, TransitionKind::Alert);
+        assert_eq!(
+            alerted.transitions[0].condition_id,
+            "target:resolver-a:upstream-mode"
+        );
+
+        // Withdraw the declaration. The row goes away; nothing resolves.
+        rewrite_config(&harness, &declaration, "");
+        run_at(&harness, "2027-01-15T08:05:00Z")
+            .await
+            .expect("withdrawn run");
+        let withdrawn = latest_report(&harness);
+        assert!(
+            withdrawn
+                .evaluations
+                .iter()
+                .all(|evaluation| evaluation.kind != "upstream_mode")
+        );
+        assert!(
+            withdrawn.transitions.is_empty(),
+            "a withdrawal is not a resolution"
+        );
+        assert!(withdrawn.findings.is_empty());
+
+        // Restore it. A retained firing latch emits no second alert; a latch
+        // that had been reset would sustain to one run and alert again.
+        rewrite_config(
+            &harness,
+            "[policies.test]\n",
+            &format!("[policies.test]\n{declaration}"),
+        );
+        run_at(&harness, "2027-01-15T08:10:00Z")
+            .await
+            .expect("restored run");
+        let restored = latest_report(&harness);
+        assert!(
+            restored
+                .findings
+                .iter()
+                .any(|finding| finding.kind == "upstream_mode" && finding.reason == "drift")
+        );
+        assert!(
+            restored.transitions.is_empty(),
+            "the retained latch must not re-alert"
+        );
     }
 
     #[tokio::test]

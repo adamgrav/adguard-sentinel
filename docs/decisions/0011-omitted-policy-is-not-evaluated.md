@@ -15,6 +15,14 @@ remain evaluated. Removing a declaration does not clear or advance its retained
 latch; if the declaration returns later, its stable condition identifier resumes
 the retained state.
 
+Independence governs which conditions exist, not which observations a condition
+may read. A required rewrite declared `enabled = true` reads the resolver's
+global rewrite switch, because an entry cannot be reported as matching while the
+switch that would make it resolve is off or unreadable; that reports as
+`globally_disabled` on the rewrite's own condition and still creates no condition
+for the undeclared switch. A declaration is only ever `clear` when the thing it
+asked for actually holds.
+
 This changes only whether an operator asked a policy question. It does not turn
 missing or invalid AdGuard data into a healthy value, and it does not weaken the
 strict request or response boundary from ADR 0003.

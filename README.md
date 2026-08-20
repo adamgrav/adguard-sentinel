@@ -132,7 +132,9 @@ install -Dm600 config.minimal.toml /etc/adguard-sentinel/config.toml
 # 2. Check the configuration. Touches no network service.
 adguard-sentinel validate-config --config /etc/adguard-sentinel/config.toml
 
-# 3. Give the dry run its own configuration and state database.
+# 3. Give the dry run its own configuration and state database. Appending works
+#    because config.minimal.toml declares no [state]; if yours does, edit the
+#    copy's state.path instead — a second [state] table is a TOML error.
 cp /etc/adguard-sentinel/config.toml /tmp/adguard-sentinel-dry-run.toml
 printf '\n[state]\npath = "/tmp/adguard-sentinel-dry-run.sqlite"\nretention_days = 21\n' >> /tmp/adguard-sentinel-dry-run.toml
 
@@ -163,12 +165,18 @@ Omitting state, observation, condition profiles, or notifications selects the
 exact values shown in the complete example. Policy and behavioural analysis are
 opt-in.
 
-| Section | Omission | Purpose |
+Defaults apply per **section**, not per field. Either leave a table out
+completely or write every field it contains — writing `[state]` with only a
+`path` fails with `missing field 'retention_days'`. The `Omitted` column below
+is what you get by leaving the whole table out; the fields inside a policy are
+the one exception, and are independently optional.
+
+| Section | Omitted | Purpose |
 | --- | --- | --- |
 | `[state]` | Reference defaults | Database path and retention |
 | `[observation]` | Reference defaults | Timeouts, response-size limit, concurrency, and how many targets must be complete for the run to be healthy |
 | `[behavioral_baseline]` | Disabled | Optional behaviour group, time zone, and learning window |
-| `[condition_profiles.*]` | `current` reference profile | Sustain and recovery counts plus latency thresholds |
+| `[condition_profiles.*]` | `current` reference profile | Sustain and recovery counts plus latency thresholds; overriding one means writing all thirteen |
 | `[notifications]` | Disabled | `disabled` or `pushover` |
 | `[policies.*]` | No policy checks | Independently optional protection, upstream, filter, and rewrite declarations |
 | `[[targets]]` | Required | Resolver identity, base URL, auth mode, and optional policy/profile selection |

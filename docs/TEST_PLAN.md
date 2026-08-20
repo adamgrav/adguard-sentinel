@@ -44,6 +44,12 @@ a coverage map that only listed strengths would be marketing.
 - Filters and rewrites outside declared policy never produce a finding.
 - A target with no policy emits no policy evaluations, and a policy with an
   upstream mode but no upstream set emits no `upstream_set` evaluation.
+- A required rewrite is `globally_disabled` rather than clear when the resolver's
+  rewrite switch is off or unreadable and the policy did not declare it, while a
+  rewrite declared `enabled = false` stays clear.
+- Protection is judged against the declared value across all four
+  declared-versus-observed combinations, and `reason` still names the observed
+  state.
 - Required filter absence, state drift, and staleness at the configured age are
   detected.
 - One condition id keeps one `kind` across all four filter outcomes and across a
@@ -63,6 +69,9 @@ a coverage map that only listed strengths would be marketing.
 - A firing, delivered latch fed a renamed kind, reason, and summary emits no
   transition, keeps its lifecycle and delivery state, continues its counter
   rather than restarting it, and keeps its first-observed timestamp.
+- Withdrawing a policy declaration removes its condition from the report without
+  resolving it, and restoring the declaration resumes the retained firing latch
+  rather than alerting a second time.
 - Aggregate thresholds are clear at equality and active above it.
 - SQLite creation with private permissions, refusal of a newer schema, rollback
   after an interrupted transaction, live and dry-run state binding, retention at

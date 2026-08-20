@@ -17,6 +17,10 @@ a behavior change that must be reflected here and in the run-report schema:
   not-evaluated.
 - Omitting `[behavioral_baseline]` produces no aggregate observation or
   behavioural conditions.
+- A condition that stops being produced retains its latch. Withdrawing a policy
+  declaration or `[behavioral_baseline]` neither resolves a firing condition nor
+  advances a recovering one, and restoring the declaration resumes the retained
+  state under the same condition identifier.
 - Behavioral aggregation advances only after every declared group member has a
   complete observation.
 - The baseline requires the configured age and same-local-hour sample count.

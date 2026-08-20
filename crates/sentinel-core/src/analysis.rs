@@ -144,22 +144,39 @@ pub fn evaluate_target(
         profile.recovery_runs,
     ));
     if let Some(protection_enabled) = policy.and_then(|policy| policy.protection_enabled) {
+        // The declared value decides the outcome; `reason` keeps naming the
+        // observed state, so the common `protection_enabled = true` policy
+        // reports exactly as it did before.
+        let verdict = match (protection_enabled, operational.protection_enabled) {
+            (true, false) => Verdict::active(
+                "disabled",
+                format!("{} AdGuard protection is disabled", target.name),
+            ),
+            (false, true) => Verdict::active(
+                "enabled",
+                format!(
+                    "{} AdGuard protection is enabled, but policy declares it disabled",
+                    target.name
+                ),
+            ),
+            (true, true) => Verdict::clear(
+                "enabled",
+                format!("{} AdGuard protection is enabled", target.name),
+            ),
+            (false, false) => Verdict::clear(
+                "disabled",
+                format!(
+                    "{} AdGuard protection is disabled, as policy declares",
+                    target.name
+                ),
+            ),
+        };
         evaluations.push(boolean_evaluation(
             format!("target:{}:protection", target.id),
             target,
             "protection",
             Severity::Critical,
-            Verdict::from_flag(
-                !operational.protection_enabled,
-                (
-                    "disabled",
-                    format!("{} AdGuard protection is disabled", target.name),
-                ),
-                (
-                    "enabled",
-                    format!("{} AdGuard protection is enabled", target.name),
-                ),
-            ),
+            verdict,
             protection_enabled,
             operational.protection_enabled,
             "GET /control/status protection_enabled",
@@ -404,7 +421,33 @@ fn evaluate_rewrites(
             normalize_rewrite_answer(&required.answer),
         );
         let current = observed.get(&key);
-        let active = current.is_none_or(|rewrite| rewrite.enabled != required.enabled);
+        // A rewrite entry only takes effect while the resolver's global rewrite
+        // switch is on, so a required-and-enabled rewrite cannot report clear
+        // while that switch is off or unreadable. The switch has its own
+        // condition, but only when the policy declares it, and an undeclared
+        // switch must not turn this row into a false clear.
+        let verdict = if current.is_none_or(|rewrite| rewrite.enabled != required.enabled) {
+            Verdict::active(
+                "missing_or_disabled",
+                format!(
+                    "{} is missing or has disabled a required rewrite",
+                    target.name
+                ),
+            )
+        } else if required.enabled && report.rewrites_enabled != Some(true) {
+            Verdict::active(
+                "globally_disabled",
+                format!(
+                    "{} has DNS rewrites switched off, so a required rewrite does not resolve",
+                    target.name
+                ),
+            )
+        } else {
+            Verdict::clear(
+                "matches_policy",
+                format!("{} required rewrite matches declared policy", target.name),
+            )
+        };
         evaluations.push(evaluation(
             format!(
                 "target:{}:rewrite:{}",
@@ -414,20 +457,7 @@ fn evaluate_rewrites(
             Some(target.id.clone()),
             "required_rewrite",
             Severity::Warning,
-            Verdict::from_flag(
-                active,
-                (
-                    "missing_or_disabled",
-                    format!(
-                        "{} is missing or has disabled a required rewrite",
-                        target.name
-                    ),
-                ),
-                (
-                    "matches_policy",
-                    format!("{} required rewrite matches declared policy", target.name),
-                ),
-            ),
+            verdict,
             json!({ "domain": key.0, "answer": key.1, "enabled": required.enabled }),
             current.map_or(Value::Null, |rewrite| {
                 json!({
@@ -1254,6 +1284,142 @@ mod tests {
                 .iter()
                 .all(|evaluation| evaluation.kind != "upstream_set")
         );
+    }
+
+    /// An entry present in the rewrite list does nothing while the resolver's
+    /// global rewrite switch is off. Declaring only `required` is legal, so
+    /// without this the whole report reads clear while no rewrite resolves.
+    #[test]
+    fn a_required_rewrite_is_not_clear_while_rewrites_are_switched_off() {
+        let policy = PolicyConfig {
+            rewrites: RequiredRewrites {
+                enabled: None,
+                required: vec![required_rewrite(
+                    "service-b.example.invalid",
+                    "192.0.2.10",
+                    true,
+                )],
+            },
+            ..PolicyConfig::default()
+        };
+
+        for switch in [Some(false), None] {
+            let mut report = target("a", 100, 10);
+            report.rewrites_enabled = switch;
+            report.rewrites = vec![observed_rewrite(
+                "service-b.example.invalid",
+                "192.0.2.10",
+                true,
+            )];
+
+            let evaluations = super::evaluate_target(
+                &target_config(),
+                Some(&policy),
+                &profile(),
+                &report,
+                1_800_000_000,
+            );
+
+            let rewrite = evaluations
+                .iter()
+                .find(|evaluation| evaluation.kind == "required_rewrite")
+                .expect("a required rewrite evaluation");
+            assert_eq!(
+                rewrite.outcome,
+                EvaluationOutcome::Active,
+                "switch {switch:?}"
+            );
+            assert_eq!(rewrite.reason, "globally_disabled", "switch {switch:?}");
+            // The policy never declared the switch, so it stays absent.
+            assert!(
+                evaluations
+                    .iter()
+                    .all(|evaluation| evaluation.kind != "rewrite_settings")
+            );
+        }
+    }
+
+    /// A rewrite declared `enabled = false` is not meant to resolve, so the
+    /// global switch being off cannot make it drift.
+    #[test]
+    fn a_rewrite_required_to_be_disabled_ignores_the_global_switch() {
+        let policy = PolicyConfig {
+            rewrites: RequiredRewrites {
+                enabled: None,
+                required: vec![required_rewrite(
+                    "service-b.example.invalid",
+                    "192.0.2.10",
+                    false,
+                )],
+            },
+            ..PolicyConfig::default()
+        };
+        let mut report = target("a", 100, 10);
+        report.rewrites_enabled = Some(false);
+        report.rewrites = vec![observed_rewrite(
+            "service-b.example.invalid",
+            "192.0.2.10",
+            false,
+        )];
+
+        let evaluations = super::evaluate_target(
+            &target_config(),
+            Some(&policy),
+            &profile(),
+            &report,
+            1_800_000_000,
+        );
+
+        let rewrite = evaluations
+            .iter()
+            .find(|evaluation| evaluation.kind == "required_rewrite")
+            .expect("a required rewrite evaluation");
+        assert_eq!(rewrite.outcome, EvaluationOutcome::Clear);
+        assert_eq!(rewrite.reason, "matches_policy");
+    }
+
+    /// The declared value decides the outcome. `reason` still names the
+    /// observed state, so a `protection_enabled = true` policy is unchanged.
+    #[test]
+    fn protection_is_judged_against_the_declared_value() {
+        for (declared, observed, outcome, reason) in [
+            (true, true, EvaluationOutcome::Clear, "enabled"),
+            (true, false, EvaluationOutcome::Active, "disabled"),
+            (false, false, EvaluationOutcome::Clear, "disabled"),
+            (false, true, EvaluationOutcome::Active, "enabled"),
+        ] {
+            let policy = PolicyConfig {
+                protection_enabled: Some(declared),
+                ..PolicyConfig::default()
+            };
+            let mut report = target("a", 100, 10);
+            report
+                .operational
+                .as_mut()
+                .expect("operational")
+                .protection_enabled = observed;
+
+            let evaluation = super::evaluate_target(
+                &target_config(),
+                Some(&policy),
+                &profile(),
+                &report,
+                1_800_000_000,
+            )
+            .into_iter()
+            .find(|evaluation| evaluation.kind == "protection")
+            .expect("a protection evaluation");
+
+            assert_eq!(
+                evaluation.outcome, outcome,
+                "declared {declared}, observed {observed}"
+            );
+            assert_eq!(
+                evaluation.reason, reason,
+                "declared {declared}, observed {observed}"
+            );
+            assert_eq!(evaluation.id, "target:a:protection");
+        }
     }
 
     #[test]

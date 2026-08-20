@@ -15,6 +15,16 @@ for compatibility with pre-0.2 configurations, but `auth = "none"` requires no
 credential fields. A target policy and every field inside a declared policy are
 independently optional.
 
+Those defaults are whole-table defaults: they apply when a table is absent, and
+the fields inside each one stay individually required. Present a table and you
+must present all of it — `[state]` with only a `path` is rejected for a missing
+`retention_days`, and overriding one `condition_profiles.current` threshold means
+restating all thirteen. The generated schema states this exactly: each definition
+keeps its own `required` array, while the root `required` array lists only
+`schema_version` and `targets`. Declared policies are the exception; every field
+inside one is separately optional, because that distinction is a behavioural one
+rather than a convenience — see [ADR 0011](decisions/0011-omitted-policy-is-not-evaluated.md).
+
 `observation.target_concurrency` is a cap, not a required target count. Its
 default of two is valid with one target; the unused slot simply stays idle.
 
@@ -60,7 +70,7 @@ Every kind, and the reasons it can report:
 | `processing_latency`, `upstream_latency` | `within_threshold`, `above_threshold` |
 | `upstream_mode`, `upstream_set`, `rewrite_settings` | `matches_policy`, `drift` |
 | `required_filter` | `matches_policy`, `missing`, `state_drift`, `stale` |
-| `required_rewrite` | `matches_policy`, `missing_or_disabled` |
+| `required_rewrite` | `matches_policy`, `missing_or_disabled`, `globally_disabled` |
 | `combined_query_volume` | `within_baseline`, `above_baseline`, `baseline_learning` |
 | `combined_blocked_ratio` | `within_baseline`, `outside_baseline`, `baseline_learning` |
 

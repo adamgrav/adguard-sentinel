@@ -91,12 +91,18 @@ field are opt-in. A missing policy field creates no condition rather than a
 Then take one real observation before installing any service. Use a **separate**
 state path for this, because a state database is permanently bound to live or
 dry-run use after its first run. Keep the production configuration untouched and
-append a temporary state section to a copy:
+point a copy at a scratch database:
 
 ```sh
 cp /etc/adguard-sentinel/config.toml /tmp/adguard-sentinel-dry-run.toml
 printf '\n[state]\npath = "/tmp/adguard-sentinel-dry-run.sqlite"\nretention_days = 21\n' >> /tmp/adguard-sentinel-dry-run.toml
 ```
+
+Appending works only while the configuration has no `[state]` table of its own,
+which is the case for anything derived from `config.minimal.toml`. Once you have
+set your own state path — `config.example.toml` declares one — edit `state.path`
+in the copy instead. TOML rejects a second `[state]` table, so appending to such
+a file fails to parse rather than overriding anything.
 
 ```sh
 adguard-sentinel check \

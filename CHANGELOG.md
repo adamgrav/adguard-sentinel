@@ -29,13 +29,31 @@ state-schema checksum is unchanged.
   default to the values in the complete example. A target defaults to the
   `current` condition profile and `allow_insecure_local_http = false`.
 - `[behavioral_baseline]` is optional. Omitting it produces no aggregate
-  observation or aggregate evaluation rows.
+  observation or aggregate evaluation rows. Removing the section from a running
+  deployment retains any aggregate latch rather than resolving it, the same rule
+  ADR 0011 states for withdrawn policy declarations; let the condition resolve
+  before removing the section if you want its alert closed.
 - A target policy and every field within one are independently optional. An
   omitted declaration produces no policy evaluation rather than a false
   `clear`; [ADR 0011](docs/decisions/0011-omitted-policy-is-not-evaluated.md)
   records the rule.
 - The README now starts with the minimal single-resolver configuration; the
   complete example remains the reference for every setting.
+
+### Fixed
+
+- A required rewrite no longer reports `matches_policy` while the resolver's
+  global rewrite switch is off. Making `rewrites.enabled` optional allowed a
+  policy to declare only `required`, in which case nothing in the report said
+  that no rewrite resolved. The rewrite's own condition now reports
+  `globally_disabled`; a rewrite declared `enabled = false` is unaffected, and no
+  condition is created for the undeclared switch.
+- A `protection_enabled = false` declaration is now honoured. The condition
+  compared nothing and fired whenever protection was off, so declaring `false`
+  produced a permanent critical finding whose own `expected` and `observed` both
+  read `false`. `reason` still names the observed state, so a
+  `protection_enabled = true` policy — the only value the example ever used —
+  reports exactly as before.
 
 ### Note when upgrading
 

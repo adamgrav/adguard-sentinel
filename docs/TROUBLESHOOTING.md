@@ -169,6 +169,16 @@ If `[behavioral_baseline]` is omitted, behavioural analysis is disabled:
 `evaluations[]`. Add the section from `config.example.toml` when you want the
 learned baseline.
 
+**Remove the section while an aggregate alert is firing and that alert never
+resolves.** A latch only advances on runs where its condition is evaluated, so a
+condition that stops being produced keeps whatever state it had: no resolution
+transition, no resolve notification, and a restored section resumes the retained
+latch rather than alerting again. This is the same retention rule ADR 0011
+describes for policy declarations, and it is deliberate — a declaration you
+withdrew was never observed to recover. To drop behavioural monitoring and clear
+its alert in one step, let the condition resolve first, or start from a fresh
+state database.
+
 Query-volume and blocked-ratio findings need a learned baseline:
 `behavioral_baseline.learning_days` of history **and**
 `behavioral_baseline.minimum_same_hour_samples` samples in the current local hour.
@@ -200,6 +210,12 @@ kind per failure mode.
 - `required_rewrite` / `missing_or_disabled` with `observed: null`: no rewrite
   matches that exact domain **and** answer pair. A rewrite for the same domain
   with a different answer does not satisfy the requirement.
+- `required_rewrite` / `globally_disabled`: the entry exists and is enabled, but
+  the resolver's global rewrite switch is off, so it does not resolve. Turn
+  rewrites on in AdGuard Home. This fires whether or not your policy declares
+  `rewrites.enabled`, because a rewrite you required cannot be reported as
+  matching while nothing it says can take effect. A rewrite you declared with
+  `enabled = false` is exempt: it is not meant to resolve.
 - `required_filter` / `stale`: the filter's last update is older than
   `maximum_age_hours`. Check that AdGuard Home is actually refreshing lists.
 
