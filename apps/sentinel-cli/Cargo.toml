@@ -19,9 +19,9 @@ jiff.workspace = true
 reqwest.workspace = true
 schemars.workspace = true
 secrecy.workspace = true
-sentinel-adguard = { version = "0.1.0", path = "../../crates/sentinel-adguard" }
-sentinel-core = { version = "0.1.0", path = "../../crates/sentinel-core" }
-sentinel-store = { version = "0.1.0", path = "../../crates/sentinel-store" }
+sentinel-adguard = { version = "0.2.0", path = "../../crates/sentinel-adguard" }
+sentinel-core = { version = "0.2.0", path = "../../crates/sentinel-core" }
+sentinel-store = { version = "0.2.0", path = "../../crates/sentinel-store" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
