@@ -9,3 +9,4 @@
 *.sqlite-wal
 *.tmp
 .DS_Store
+/.claude/
