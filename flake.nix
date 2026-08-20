@@ -54,7 +54,7 @@
         {
           default = rustPlatform.buildRustPackage {
             pname = "adguard-sentinel";
-            version = "0.1.3";
+            version = "0.2.0";
             src = cleanSource;
             cargoLock.lockFile = ./Cargo.lock;
             doCheck = true;

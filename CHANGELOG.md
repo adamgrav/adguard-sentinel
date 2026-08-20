@@ -3,7 +3,7 @@
 Notable changes to AdGuard Sentinel. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.2.0 — 2026-08-20
 
 Every configuration accepted by v0.1.3 remains valid and keeps the same target
 evaluations. The configuration schema stays at version 1 because the changes
@@ -18,8 +18,10 @@ state-schema checksum is unchanged.
   v0.1.3 behavior and its file-only password requirement.
 - [`config.minimal.toml`](config.minimal.toml), a one-resolver, no-auth
   configuration with notifications disabled by default.
-- `aarch64-linux` flake outputs and a native GitHub Actions matrix job. The
-  platform remains marked **Pending** until that job has a recorded green run.
+- `aarch64-linux` flake outputs and a native GitHub Actions matrix job on
+  `ubuntu-24.04-arm`, which runs the same reproducible checks as `x86_64`. The
+  platform is **Verified** in `docs/SUPPORT.md` on the strength of that job's
+  green run, not by inference from `x86_64` passing.
 - Documentation for direct tagged Git installation with Cargo; crates.io
   publication remains disabled.
 

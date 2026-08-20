@@ -82,8 +82,8 @@ These are the design, not a disclaimer. They are why the project is small.
 ## Support
 
 Sentinel builds from source on `x86_64` Linux with Rust 1.97.1, and Nix provides
-the reproducible packaging path for `x86_64-linux` and `aarch64-linux`. ARM Linux
-CI is configured but remains pending until it has a recorded green run. Pushover
+the reproducible packaging path for `x86_64-linux` and `aarch64-linux`. Both are
+built and tested natively in CI on every push to `main`. Pushover
 is the only notification provider, and a systemd timer is the only supported
 scheduling method. AdGuard Home
 `>=0.107.78,<0.108.0` is the supported API range; another range can be

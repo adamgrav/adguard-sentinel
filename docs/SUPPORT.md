@@ -21,7 +21,7 @@ different configuration working.
 | macOS | `aarch64` | Development only | Nix flake | **Verified**: package built and full suite run |
 | Linux | `x86_64` | Deployment and development | Nix flake | **Verified** in CI |
 | Linux | `x86_64` | Deployment and development | Source build with rustup | **Verified** in CI |
-| Linux | `aarch64` | Deployment and development | Nix flake | **Pending**: a native CI job exists, but no green run is recorded yet |
+| Linux | `aarch64` | Deployment and development | Nix flake | **Verified** in CI |
 | macOS | any | Deployment | — | **Unsupported**: no systemd, so no supported scheduling path |
 | Windows | any | — | — | **Unsupported** |
 
@@ -29,12 +29,12 @@ macOS is a development platform only. The package builds and the whole suite run
 there, which is why it is listed, but there is no supported way to schedule
 Sentinel on it.
 
-The two `x86_64` Linux rows are re-established on every push to `main`: one CI
-job builds the flake package and runs the full suite, and a separate job uses
-rustup. The `aarch64` flake output evaluates locally and has the same native Nix
-CI job on `ubuntu-24.04-arm`, but it stays **Pending** until that job records a
-green run. A row is marked **Verified** only for that exact configuration, never
-by inference from a related one passing.
+Every Linux row is re-established on every push to `main`. Two native Nix jobs
+build the flake package and run the full suite, on `ubuntu-24.04` and
+`ubuntu-24.04-arm`, and a separate job builds `x86_64` from source with rustup.
+A row is marked **Verified** only for that exact configuration, never by
+inference from a related one passing, which is why `aarch64` has no rustup row:
+that build has never been run.
 
 ## Toolchain
 
