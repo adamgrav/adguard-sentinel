@@ -19,6 +19,9 @@ a coverage map that only listed strengths would be marketing.
 - Observations fail closed on a redirect, a non-success status, rejected
   authentication, an unsupported version, a stopped server, a malformed body, a
   missing required field, an oversized body, and a request timeout.
+- `auth = "none"` is matched only when every allowlisted request omits the
+  `Authorization` header; the compatibility test for Basic authentication
+  requires the prior header value on all six requests.
 - Statistics fail closed on negative processing time, a blocked count above the
   query count, and a duplicated client identity.
 - Declared data fails closed on a duplicated upstream set, a duplicated filter
@@ -39,6 +42,14 @@ a coverage map that only listed strengths would be marketing.
 - A disabled required rewrite, a required rewrite answered differently, an
   absent required rewrite, and a disabled global rewrite setting are each drift.
 - Filters and rewrites outside declared policy never produce a finding.
+- A target with no policy emits no policy evaluations, and a policy with an
+  upstream mode but no upstream set emits no `upstream_set` evaluation.
+- A required rewrite is `globally_disabled` rather than clear when the resolver's
+  rewrite switch is off or unreadable and the policy did not declare it, while a
+  rewrite declared `enabled = false` stays clear.
+- Protection is judged against the declared value across all four
+  declared-versus-observed combinations, and `reason` still names the observed
+  state.
 - Required filter absence, state drift, and staleness at the configured age are
   detected.
 - One condition id keeps one `kind` across all four filter outcomes and across a
@@ -47,7 +58,9 @@ a coverage map that only listed strengths would be marketing.
   contains the failure phrasing it ruled out.
 - Latency comparisons are strictly greater-than at their exact boundary.
 - Configuration schema, size, cross-reference, URL, duration, and secret-file
-  validation. *thin*
+  validation. The checked-in minimal configuration validates with only one
+  no-auth target; the full example equals the generated defaults; a one-field
+  policy validates. *thin*
 
 ## Behavior and state
 
@@ -56,6 +69,9 @@ a coverage map that only listed strengths would be marketing.
 - A firing, delivered latch fed a renamed kind, reason, and summary emits no
   transition, keeps its lifecycle and delivery state, continues its counter
   rather than restarting it, and keeps its first-observed timestamp.
+- Withdrawing a policy declaration removes its condition from the report without
+  resolving it, and restoring the declaration resumes the retained firing latch
+  rather than alerting a second time.
 - Aggregate thresholds are clear at equality and active above it.
 - SQLite creation with private permissions, refusal of a newer schema, rollback
   after an interrupted transaction, live and dry-run state binding, retention at
@@ -91,6 +107,10 @@ Every documented code also has a distinct reason string.
 
 - A dry run never loads notification credentials, and its run is recorded in
   dry-run mode.
+- A run with no behavioral baseline persists no aggregate observation and emits
+  no aggregate conditions.
+- A configuration in the v0.1.3 shape still validates and produces the same
+  target condition identifiers, kinds, reasons, and clear outcomes.
 - Pushover classification for confirmed success and for retryable versus
   permanent HTTP failures, at the unit level and through a mock endpoint.
 - A confirmed delivery records the remote request identifier.

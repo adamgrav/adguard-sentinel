@@ -15,6 +15,7 @@ const MAX_CONFIG_BYTES: u64 = 1_048_576;
 const MAX_TARGETS: usize = 64;
 const MAX_RESPONSE_BYTES: u64 = 16 * 1_048_576;
 const SUPPORTED_ADGUARD_REQUIREMENT: &str = ">=0.107.78,<0.108.0";
+const DEFAULT_CONDITION_PROFILE_ID: &str = "current";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -44,11 +45,16 @@ pub enum ConfigError {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub schema_version: u32,
+    #[serde(default)]
     pub state: StateConfig,
+    #[serde(default)]
     pub observation: ObservationConfig,
-    pub behavioral_baseline: BehavioralBaselineConfig,
+    pub behavioral_baseline: Option<BehavioralBaselineConfig>,
+    #[serde(default = "default_condition_profiles")]
     pub condition_profiles: BTreeMap<String, ConditionProfile>,
+    #[serde(default)]
     pub notifications: NotificationConfig,
+    #[serde(default)]
     pub policies: BTreeMap<String, PolicyConfig>,
     pub targets: Vec<TargetConfig>,
 }
@@ -58,6 +64,15 @@ pub struct Config {
 pub struct StateConfig {
     pub path: PathBuf,
     pub retention_days: u32,
+}
+
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from("/var/lib/adguard-sentinel/state.sqlite"),
+            retention_days: 21,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -77,6 +92,21 @@ pub struct ObservationConfig {
     /// widened, never the strictness of the check.
     #[serde(default)]
     pub allow_untested_adguard_version: bool,
+}
+
+impl Default for ObservationConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_ms: 5_000,
+            notification_timeout_ms: 15_000,
+            max_response_bytes: 4_194_304,
+            stats_lookback_ms: 3_600_000,
+            target_concurrency: 2,
+            minimum_complete_targets: 1,
+            adguard_version_requirement: SUPPORTED_ADGUARD_REQUIREMENT.to_owned(),
+            allow_untested_adguard_version: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -106,11 +136,46 @@ pub struct ConditionProfile {
     pub upstream_latency_ms: u64,
 }
 
+impl Default for ConditionProfile {
+    fn default() -> Self {
+        Self {
+            authentication_rejected_sustain_runs: 1,
+            api_unavailable_sustain_runs: 4,
+            invalid_response_sustain_runs: 1,
+            unsupported_version_sustain_runs: 1,
+            protection_disabled_sustain_runs: 2,
+            processing_latency_sustain_runs: 4,
+            upstream_latency_sustain_runs: 4,
+            policy_drift_sustain_runs: 4,
+            behavioral_anomaly_sustain_runs: 4,
+            recovery_runs: 1,
+            authentication_retry_seconds: 900,
+            processing_latency_ms: 500,
+            upstream_latency_ms: 750,
+        }
+    }
+}
+
+fn default_condition_profiles() -> BTreeMap<String, ConditionProfile> {
+    BTreeMap::from([(
+        DEFAULT_CONDITION_PROFILE_ID.to_owned(),
+        ConditionProfile::default(),
+    )])
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationProvider {
     Disabled,
     Pushover,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetAuth {
+    None,
+    #[default]
+    Basic,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -120,6 +185,15 @@ pub struct NotificationConfig {
     pub pushover: Option<PushoverConfig>,
 }
 
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            provider: NotificationProvider::Disabled,
+            pushover: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PushoverConfig {
@@ -127,13 +201,15 @@ pub struct PushoverConfig {
     pub user_key_file: PathBuf,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
-    pub protection_enabled: bool,
-    pub upstream_mode: String,
-    pub upstream_dns: Vec<String>,
+    pub protection_enabled: Option<bool>,
+    pub upstream_mode: Option<String>,
+    pub upstream_dns: Option<Vec<String>>,
+    #[serde(default)]
     pub filters: Vec<RequiredFilter>,
+    #[serde(default)]
     pub rewrites: RequiredRewrites,
 }
 
@@ -145,10 +221,11 @@ pub struct RequiredFilter {
     pub maximum_age_hours: Option<u32>,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredRewrites {
-    pub enabled: bool,
+    pub enabled: Option<bool>,
+    #[serde(default)]
     pub required: Vec<RequiredRewrite>,
 }
 
@@ -166,11 +243,19 @@ pub struct TargetConfig {
     pub id: String,
     pub name: String,
     pub base_url: String,
-    pub username: String,
-    pub password_file: PathBuf,
-    pub policy: String,
+    #[serde(default)]
+    pub auth: TargetAuth,
+    pub username: Option<String>,
+    pub password_file: Option<PathBuf>,
+    pub policy: Option<String>,
+    #[serde(default = "default_condition_profile_id")]
     pub condition_profile: String,
+    #[serde(default)]
     pub allow_insecure_local_http: bool,
+}
+
+fn default_condition_profile_id() -> String {
+    DEFAULT_CONDITION_PROFILE_ID.to_owned()
 }
 
 impl Config {
@@ -207,7 +292,9 @@ impl Config {
         if self.state.retention_days == 0 {
             errors.push("state.retention_days must be positive".to_owned());
         }
-        if self.state.retention_days < self.behavioral_baseline.learning_days {
+        if let Some(baseline) = &self.behavioral_baseline
+            && self.state.retention_days < baseline.learning_days
+        {
             errors.push(
                 "state.retention_days must be at least behavioral_baseline.learning_days"
                     .to_owned(),
@@ -247,11 +334,11 @@ impl Config {
             ));
         }
         if self.observation.target_concurrency == 0
-            || self.observation.target_concurrency > self.targets.len()
+            || self.observation.target_concurrency > MAX_TARGETS
         {
-            errors.push(
-                "observation.target_concurrency must be between 1 and target count".to_owned(),
-            );
+            errors.push(format!(
+                "observation.target_concurrency must be between 1 and {MAX_TARGETS}"
+            ));
         }
         if self.observation.minimum_complete_targets == 0
             || self.observation.minimum_complete_targets > self.targets.len()
@@ -273,14 +360,15 @@ impl Config {
                 self.observation.adguard_version_requirement
             ));
         }
-        if self.behavioral_baseline.time_zone.trim().is_empty() {
-            errors.push("behavioral_baseline.time_zone must not be empty".to_owned());
-        }
-        if self.behavioral_baseline.learning_days == 0
-            || self.behavioral_baseline.minimum_same_hour_samples == 0
-        {
-            errors
-                .push("behavioral baseline learning and sample counts must be positive".to_owned());
+        if let Some(baseline) = &self.behavioral_baseline {
+            if baseline.time_zone.trim().is_empty() {
+                errors.push("behavioral_baseline.time_zone must not be empty".to_owned());
+            }
+            if baseline.learning_days == 0 || baseline.minimum_same_hour_samples == 0 {
+                errors.push(
+                    "behavioral baseline learning and sample counts must be positive".to_owned(),
+                );
+            }
         }
 
         validate_profiles(&self.condition_profiles, &mut errors);
@@ -385,28 +473,27 @@ fn validate_profiles(profiles: &BTreeMap<String, ConditionProfile>, errors: &mut
 }
 
 fn validate_policies(policies: &BTreeMap<String, PolicyConfig>, errors: &mut Vec<String>) {
-    if policies.is_empty() {
-        errors.push("policies must not be empty".to_owned());
-    }
     for (id, policy) in policies {
         if !valid_id(id) {
             errors.push(format!("policy id {id:?} is not a stable slug"));
         }
-        if policy.upstream_mode.trim().is_empty() || policy.upstream_dns.is_empty() {
-            errors.push(format!(
-                "policy {id:?} must declare upstream mode and servers"
-            ));
-        }
-        let upstreams: BTreeSet<_> = policy.upstream_dns.iter().collect();
-        if upstreams.len() != policy.upstream_dns.len()
-            || policy
-                .upstream_dns
-                .iter()
-                .any(|value| value.trim().is_empty())
+        if policy
+            .upstream_mode
+            .as_deref()
+            .is_some_and(|mode| mode.trim().is_empty())
         {
-            errors.push(format!(
-                "policy {id:?} upstream_dns must be unique and nonempty"
-            ));
+            errors.push(format!("policy {id:?} upstream_mode must not be empty"));
+        }
+        if let Some(upstream_dns) = &policy.upstream_dns {
+            let upstreams: BTreeSet<_> = upstream_dns.iter().collect();
+            if upstream_dns.is_empty()
+                || upstreams.len() != upstream_dns.len()
+                || upstream_dns.iter().any(|value| value.trim().is_empty())
+            {
+                errors.push(format!(
+                    "policy {id:?} upstream_dns must be unique and nonempty"
+                ));
+            }
         }
         let mut filter_urls = BTreeSet::new();
         for filter in &policy.filters {
@@ -461,13 +548,47 @@ fn validate_targets(config: &Config, check_secret_files: bool, errors: &mut Vec<
                 target.name
             ));
         }
-        if target.username.trim().is_empty() {
-            errors.push(format!("target {:?} username must not be empty", target.id));
+        match target.auth {
+            TargetAuth::None => {
+                if target.username.is_some() || target.password_file.is_some() {
+                    errors.push(format!(
+                        "target {:?} must omit username and password_file when auth is none",
+                        target.id
+                    ));
+                }
+            }
+            TargetAuth::Basic => {
+                match target.username.as_deref() {
+                    Some(username) if !username.trim().is_empty() => {}
+                    _ => errors.push(format!(
+                        "target {:?} username must not be empty when auth is basic",
+                        target.id
+                    )),
+                }
+                match target.password_file.as_deref() {
+                    Some(password_file) => {
+                        validate_absolute_path("target.password_file", password_file, errors);
+                        if check_secret_files {
+                            validate_secret_file(
+                                password_file,
+                                &format!("target {:?} password", target.id),
+                                errors,
+                            );
+                        }
+                    }
+                    None => errors.push(format!(
+                        "target {:?} password_file is required when auth is basic",
+                        target.id
+                    )),
+                }
+            }
         }
-        if !config.policies.contains_key(&target.policy) {
+        if let Some(policy) = &target.policy
+            && !config.policies.contains_key(policy)
+        {
             errors.push(format!(
-                "target {:?} references unknown policy {:?}",
-                target.id, target.policy
+                "target {:?} references unknown policy {policy:?}",
+                target.id
             ));
         }
         if !config
@@ -480,41 +601,35 @@ fn validate_targets(config: &Config, check_secret_files: bool, errors: &mut Vec<
             ));
         }
         validate_target_url(target, errors);
-        validate_absolute_path("target.password_file", &target.password_file, errors);
-        if check_secret_files {
-            validate_secret_file(
-                &target.password_file,
-                &format!("target {:?} password", target.id),
-                errors,
-            );
+    }
+    if let Some(baseline) = &config.behavioral_baseline {
+        let configured_ids: BTreeSet<_> = config.targets.iter().map(|target| &target.id).collect();
+        let baseline_ids: BTreeSet<_> = baseline.target_ids.iter().collect();
+        if baseline_ids.is_empty() {
+            errors.push("behavioral_baseline.target_ids must not be empty".to_owned());
         }
-    }
-    let configured_ids: BTreeSet<_> = config.targets.iter().map(|target| &target.id).collect();
-    let baseline_ids: BTreeSet<_> = config.behavioral_baseline.target_ids.iter().collect();
-    if baseline_ids.is_empty() {
-        errors.push("behavioral_baseline.target_ids must not be empty".to_owned());
-    }
-    let mut seen_baseline_ids = BTreeSet::new();
-    for id in &config.behavioral_baseline.target_ids {
-        if !seen_baseline_ids.insert(id) {
+        let mut seen_baseline_ids = BTreeSet::new();
+        for id in &baseline.target_ids {
+            if !seen_baseline_ids.insert(id) {
+                errors.push(format!(
+                    "behavioral_baseline.target_ids repeats target {id:?}"
+                ));
+            }
+        }
+        for id in baseline_ids.difference(&configured_ids) {
             errors.push(format!(
-                "behavioral_baseline.target_ids repeats target {id:?}"
+                "behavioral_baseline.target_ids references unknown target {id:?}"
             ));
         }
-    }
-    for id in baseline_ids.difference(&configured_ids) {
-        errors.push(format!(
-            "behavioral_baseline.target_ids references unknown target {id:?}"
-        ));
-    }
-    let baseline_profiles: BTreeSet<_> = config
-        .targets
-        .iter()
-        .filter(|target| baseline_ids.contains(&target.id))
-        .map(|target| target.condition_profile.as_str())
-        .collect();
-    if baseline_profiles.len() > 1 {
-        errors.push("behavioral_baseline targets must share one condition profile".to_owned());
+        let baseline_profiles: BTreeSet<_> = config
+            .targets
+            .iter()
+            .filter(|target| baseline_ids.contains(&target.id))
+            .map(|target| target.condition_profile.as_str())
+            .collect();
+        if baseline_profiles.len() > 1 {
+            errors.push("behavioral_baseline targets must share one condition profile".to_owned());
+        }
     }
 }
 
@@ -639,7 +754,11 @@ pub fn normalize_rewrite_answer(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, normalize_dns_name, normalize_rewrite_answer};
+    use super::{
+        ConditionProfile, Config, NotificationConfig, NotificationProvider, ObservationConfig,
+        StateConfig, TargetAuth, default_condition_profiles, normalize_dns_name,
+        normalize_rewrite_answer,
+    };
 
     #[test]
     fn normalizes_dns_values() {
@@ -661,5 +780,159 @@ mod tests {
             include_str!("../../../config.example.toml")
         );
         assert!(toml::from_str::<Config>(&text).is_err());
+    }
+
+    #[test]
+    fn omitted_auth_preserves_basic_authentication() {
+        let text = include_str!("../../../config.example.toml").replace("auth = \"basic\"\n", "");
+        let config: Config = toml::from_str(&text).expect("v0.1.3 example TOML");
+
+        assert!(
+            config
+                .targets
+                .iter()
+                .all(|target| target.auth == TargetAuth::Basic)
+        );
+        config.validate(false).expect("v0.1.3 authentication");
+    }
+
+    #[test]
+    fn no_authentication_needs_no_credentials() {
+        let mut config: Config =
+            toml::from_str(include_str!("../../../config.example.toml")).expect("example TOML");
+        for target in &mut config.targets {
+            target.auth = TargetAuth::None;
+            target.username = None;
+            target.password_file = None;
+        }
+
+        config.validate(false).expect("no-auth targets");
+    }
+
+    #[test]
+    fn basic_authentication_still_requires_file_credentials() {
+        let mut config: Config =
+            toml::from_str(include_str!("../../../config.example.toml")).expect("example TOML");
+        config.targets[0].password_file = None;
+
+        let error = config
+            .validate(false)
+            .expect_err("basic auth without a password file must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("target \"resolver-a\" password_file is required when auth is basic")
+        );
+    }
+
+    #[test]
+    fn reference_sections_equal_their_omission_defaults() {
+        let config: Config =
+            toml::from_str(include_str!("../../../config.example.toml")).expect("example TOML");
+
+        assert_eq!(
+            serde_json::to_value(&config.state).expect("state JSON"),
+            serde_json::to_value(StateConfig::default()).expect("default state JSON")
+        );
+        assert_eq!(
+            serde_json::to_value(&config.observation).expect("observation JSON"),
+            serde_json::to_value(ObservationConfig::default()).expect("default observation JSON")
+        );
+        assert_eq!(
+            serde_json::to_value(&config.condition_profiles).expect("profiles JSON"),
+            serde_json::to_value(default_condition_profiles()).expect("default profiles JSON")
+        );
+        assert_eq!(
+            serde_json::to_value(&config.notifications).expect("notifications JSON"),
+            serde_json::to_value(NotificationConfig::default())
+                .expect("default notifications JSON")
+        );
+    }
+
+    #[test]
+    fn operational_sections_and_behavioral_baseline_can_be_omitted() {
+        let text = r#"
+schema_version = 1
+
+[policies.home]
+protection_enabled = true
+upstream_mode = "load_balance"
+upstream_dns = ["tls://resolver.invalid"]
+filters = []
+
+[policies.home.rewrites]
+enabled = true
+required = []
+
+[[targets]]
+id = "resolver"
+name = "Resolver"
+base_url = "https://resolver.invalid"
+auth = "none"
+policy = "home"
+"#;
+        let config: Config = toml::from_str(text).expect("configuration with defaults");
+
+        config.validate(false).expect("defaulted configuration");
+        assert!(config.behavioral_baseline.is_none());
+        assert_eq!(config.targets[0].condition_profile, "current");
+        assert!(!config.targets[0].allow_insecure_local_http);
+        assert!(matches!(
+            config.notifications.provider,
+            NotificationProvider::Disabled
+        ));
+        assert_eq!(
+            config
+                .condition_profiles
+                .get("current")
+                .map(|profile| profile.processing_latency_ms),
+            Some(ConditionProfile::default().processing_latency_ms)
+        );
+    }
+
+    #[test]
+    fn one_no_auth_target_is_a_complete_minimal_configuration() {
+        let text = include_str!("../../../config.minimal.toml");
+        let config: Config = toml::from_str(text).expect("minimal configuration");
+
+        config.validate(false).expect("minimal semantics");
+        assert!(config.policies.is_empty());
+        assert!(config.targets[0].policy.is_none());
+        assert!(config.behavioral_baseline.is_none());
+        assert!(matches!(
+            config.notifications.provider,
+            NotificationProvider::Disabled
+        ));
+    }
+
+    #[test]
+    fn a_policy_can_declare_only_one_independent_field() {
+        let text = r#"
+schema_version = 1
+
+[policies.protection-only]
+protection_enabled = true
+
+[[targets]]
+id = "resolver"
+name = "Resolver"
+base_url = "https://resolver.invalid"
+auth = "none"
+policy = "protection-only"
+"#;
+        let config: Config = toml::from_str(text).expect("partial policy");
+
+        config.validate(false).expect("partial policy semantics");
+        let policy = config
+            .policies
+            .get("protection-only")
+            .expect("declared policy");
+        assert_eq!(policy.protection_enabled, Some(true));
+        assert!(policy.upstream_mode.is_none());
+        assert!(policy.upstream_dns.is_none());
+        assert!(policy.filters.is_empty());
+        assert!(policy.rewrites.enabled.is_none());
+        assert!(policy.rewrites.required.is_empty());
     }
 }

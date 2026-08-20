@@ -11,8 +11,8 @@ use secrecy::{ExposeSecret, SecretString};
 use semver::{Version, VersionReq};
 use sentinel_core::config::{PolicyConfig, normalize_dns_name, normalize_rewrite_answer};
 use sentinel_core::{
-    DnsObservation, FilterObservation, OperationalObservation, RewriteObservation, TargetConfig,
-    TargetReport, TargetStatus, UpstreamObservation,
+    DnsObservation, FilterObservation, OperationalObservation, RewriteObservation, TargetAuth,
+    TargetConfig, TargetReport, TargetStatus, UpstreamObservation,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -68,8 +68,8 @@ pub trait AdGuardReadClient: Send + Sync {
     async fn observe(
         &self,
         target: &TargetConfig,
-        policy: &PolicyConfig,
-        password: &SecretString,
+        policy: Option<&PolicyConfig>,
+        password: Option<&SecretString>,
         stats_lookback_ms: u64,
         now_unix_seconds: i64,
     ) -> Result<TargetReport, AdGuardError>;
@@ -112,20 +112,37 @@ impl ReqwestAdGuardClient {
 
     async fn get_json<T: DeserializeOwned>(
         &self,
-        base_url: &str,
+        target: &TargetConfig,
         endpoint: Endpoint,
-        username: &str,
-        password: &SecretString,
+        password: Option<&SecretString>,
     ) -> Result<T, AdGuardError> {
-        let url = endpoint.url(base_url)?;
+        let url = endpoint.url(&target.base_url)?;
         let label = endpoint.label();
-        let mut response = self
+        let request = self
             .client
             .get(url)
             .header(ACCEPT, "application/json")
             .header(ACCEPT_ENCODING, "identity")
-            .header(USER_AGENT, USER_AGENT_VALUE)
-            .basic_auth(username, Some(password.expose_secret()))
+            .header(USER_AGENT, USER_AGENT_VALUE);
+        let request = match target.auth {
+            TargetAuth::None => request,
+            TargetAuth::Basic => {
+                let Some(username) = target.username.as_deref() else {
+                    return Err(AdGuardError::InvalidResponse {
+                        endpoint: "configuration",
+                        detail: "basic authentication requires a username".to_owned(),
+                    });
+                };
+                let Some(password) = password else {
+                    return Err(AdGuardError::InvalidResponse {
+                        endpoint: "configuration",
+                        detail: "basic authentication requires a password".to_owned(),
+                    });
+                };
+                request.basic_auth(username, Some(password.expose_secret()))
+            }
+        };
+        let mut response = request
             .send()
             .await
             .map_err(|error| AdGuardError::Unavailable {
@@ -184,19 +201,12 @@ impl AdGuardReadClient for ReqwestAdGuardClient {
     async fn observe(
         &self,
         target: &TargetConfig,
-        policy: &PolicyConfig,
-        password: &SecretString,
+        policy: Option<&PolicyConfig>,
+        password: Option<&SecretString>,
         stats_lookback_ms: u64,
         now_unix_seconds: i64,
     ) -> Result<TargetReport, AdGuardError> {
-        let status: StatusResponse = self
-            .get_json(
-                &target.base_url,
-                Endpoint::Status,
-                &target.username,
-                password,
-            )
-            .await?;
+        let status: StatusResponse = self.get_json(target, Endpoint::Status, password).await?;
         let version = Version::parse(status.version.trim_start_matches('v')).map_err(|_| {
             AdGuardError::InvalidResponse {
                 endpoint: Endpoint::Status.label(),
@@ -216,44 +226,17 @@ impl AdGuardReadClient for ReqwestAdGuardClient {
             });
         }
         let statistics: StatsResponse = self
-            .get_json(
-                &target.base_url,
-                Endpoint::Stats(stats_lookback_ms),
-                &target.username,
-                password,
-            )
+            .get_json(target, Endpoint::Stats(stats_lookback_ms), password)
             .await?;
-        let dns: DnsResponse = self
-            .get_json(
-                &target.base_url,
-                Endpoint::DnsInfo,
-                &target.username,
-                password,
-            )
-            .await?;
+        let dns: DnsResponse = self.get_json(target, Endpoint::DnsInfo, password).await?;
         let filtering: FilteringResponse = self
-            .get_json(
-                &target.base_url,
-                Endpoint::FilteringStatus,
-                &target.username,
-                password,
-            )
+            .get_json(target, Endpoint::FilteringStatus, password)
             .await?;
         let rewrites: Vec<RewriteResponse> = self
-            .get_json(
-                &target.base_url,
-                Endpoint::RewriteList,
-                &target.username,
-                password,
-            )
+            .get_json(target, Endpoint::RewriteList, password)
             .await?;
         let rewrite_settings: RewriteSettingsResponse = self
-            .get_json(
-                &target.base_url,
-                Endpoint::RewriteSettings,
-                &target.username,
-                password,
-            )
+            .get_json(target, Endpoint::RewriteSettings, password)
             .await?;
 
         let operational = normalize_stats(status.protection_enabled, &statistics)?;
@@ -474,12 +457,12 @@ fn normalize_dns(dns: DnsResponse) -> Result<DnsObservation, AdGuardError> {
 
 fn normalize_filters(
     filters: Vec<FilterResponse>,
-    policy: &PolicyConfig,
+    policy: Option<&PolicyConfig>,
     now_unix_seconds: i64,
 ) -> Result<Vec<FilterObservation>, AdGuardError> {
     let required: BTreeSet<_> = policy
-        .filters
-        .iter()
+        .into_iter()
+        .flat_map(|policy| &policy.filters)
         .map(|filter| filter.url.as_str())
         .collect();
     let mut seen = BTreeSet::new();
@@ -593,7 +576,7 @@ mod tests {
     use httpmock::{Mock, MockServer};
     use secrecy::SecretString;
     use sentinel_core::config::{PolicyConfig, TargetConfig};
-    use sentinel_core::{Config, TargetReport};
+    use sentinel_core::{Config, TargetAuth, TargetReport};
 
     use super::{
         AdGuardError, AdGuardReadClient, DnsResponse, FilteringResponse, ReqwestAdGuardClient,
@@ -689,9 +672,10 @@ mod tests {
             id: "resolver-a".to_owned(),
             name: "Resolver A".to_owned(),
             base_url,
-            username: "admin".to_owned(),
-            password_file: PathBuf::from("/run/credentials/synthetic-password"),
-            policy: "home".to_owned(),
+            auth: TargetAuth::Basic,
+            username: Some("admin".to_owned()),
+            password_file: Some(PathBuf::from("/run/credentials/synthetic-password")),
+            policy: Some("home".to_owned()),
             condition_profile: "current".to_owned(),
             allow_insecure_local_http: false,
         }
@@ -718,8 +702,8 @@ mod tests {
         client
             .observe(
                 &target(server.base_url()),
-                &example_policy(),
-                &SecretString::from("synthetic".to_owned()),
+                Some(&example_policy()),
+                Some(&SecretString::from("synthetic".to_owned())),
                 LOOKBACK_MS,
                 NOW,
             )
@@ -773,7 +757,12 @@ mod tests {
 
         let dns = report.dns.expect("dns observation");
         assert_eq!(dns.upstream_mode, "load_balance");
-        assert_eq!(dns.upstream_dns, example_policy().upstream_dns);
+        assert_eq!(
+            dns.upstream_dns,
+            example_policy()
+                .upstream_dns
+                .expect("the example declares upstreams")
+        );
 
         let upstreams: Vec<_> = report
             .upstreams
@@ -831,6 +820,65 @@ mod tests {
             mock.assert_calls_async(1).await;
         }
         outside_allowlist.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn no_authentication_sends_no_authorization_header() {
+        let server = MockServer::start_async().await;
+        let mut mocks = Vec::new();
+        for (path, body) in golden_bodies() {
+            mocks.push(
+                server
+                    .mock_async(move |when, then| {
+                        when.method(GET).path(path).header_missing("authorization");
+                        then.status(200)
+                            .header("content-type", "application/json")
+                            .body(body);
+                    })
+                    .await,
+            );
+        }
+        let mut target = target(server.base_url());
+        target.auth = TargetAuth::None;
+        target.username = None;
+        target.password_file = None;
+
+        let report = bounded_client(TIMEOUT_MS, MAX_BYTES)
+            .observe(&target, Some(&example_policy()), None, LOOKBACK_MS, NOW)
+            .await
+            .expect("no-auth observation");
+
+        assert!(report.complete);
+        for mock in mocks {
+            mock.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn basic_authentication_keeps_sending_file_credentials() {
+        let server = MockServer::start_async().await;
+        let mut mocks = Vec::new();
+        for (path, body) in golden_bodies() {
+            mocks.push(
+                server
+                    .mock_async(move |when, then| {
+                        when.method(GET)
+                            .path(path)
+                            .header("authorization", "Basic YWRtaW46c3ludGhldGlj");
+                        then.status(200)
+                            .header("content-type", "application/json")
+                            .body(body);
+                    })
+                    .await,
+            );
+        }
+
+        let report = observe(&server).await.expect("basic-auth observation");
+
+        assert!(report.complete);
+        for mock in mocks {
+            mock.assert_calls_async(1).await;
+        }
     }
 
     #[tokio::test]
@@ -1235,7 +1283,7 @@ mod tests {
     fn retains_only_filters_named_by_declared_policy() {
         let observed = normalize_filters(
             filtering_of(FILTERING_STATUS).filters,
-            &example_policy(),
+            Some(&example_policy()),
             NOW,
         )
         .expect("golden filters");
@@ -1271,7 +1319,7 @@ mod tests {
     fn rejects_a_required_filter_updated_in_the_future() {
         let error = normalize_filters(
             filtering_of(MALFORMED_FUTURE_FILTER_UPDATE).filters,
-            &example_policy(),
+            Some(&example_policy()),
             NOW,
         )
         .expect_err("a future update time must fail");
@@ -1286,7 +1334,7 @@ mod tests {
     fn rejects_an_enabled_required_filter_without_an_update_time() {
         let error = normalize_filters(
             filtering_of(MALFORMED_ENABLED_FILTER_WITHOUT_UPDATE).filters,
-            &example_policy(),
+            Some(&example_policy()),
             NOW,
         )
         .expect_err("an enabled required filter needs an update time");
@@ -1306,7 +1354,7 @@ mod tests {
             ]}"#,
         );
 
-        let error = normalize_filters(response.filters, &example_policy(), NOW)
+        let error = normalize_filters(response.filters, Some(&example_policy()), NOW)
             .expect_err("a duplicated filter URL must fail");
 
         assert_eq!(

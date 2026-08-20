@@ -15,11 +15,11 @@ apps/
 
 ```text
 TOML validation
-  -> secret-file loading
+  -> optional secret-file loading
   -> bounded target observation
   -> strict response normalization
-  -> per-target evaluation
-  -> explicit-group behavioral evaluation
+  -> per-target operational and declared-policy evaluation
+  -> optional explicit-group behavioral evaluation
   -> atomic run/state/outbox transaction
   -> notification delivery after commit
   -> versioned report and exit status
@@ -46,9 +46,8 @@ The remaining non-test `expect` calls are limited to invariants established
 earlier in the same function or by configuration validation that has already
 succeeded:
 
-- Policy, condition-profile, password, and per-target report lookups in the CLI
-  are keyed by identifiers that `Config::validate` has already proved present and
-  unique.
+- Condition-profile and per-target report lookups in the CLI are keyed by
+  identifiers that `Config::validate` has already proved present and unique.
 - The two single-entry map reads in the AdGuard decoder are guarded by an
   explicit length check on the line above.
 - Serializing a condition's expected and observed values, and fingerprinting a

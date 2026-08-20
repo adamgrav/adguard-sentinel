@@ -18,8 +18,8 @@ use sentinel_adguard::{AdGuardError, AdGuardReadClient, ReqwestAdGuardClient};
 use sentinel_core::{
     AlertDeliveryState, Clock, Config, EvaluationOutcome, ExitReport, NotificationProvider,
     NotificationStatus, REPORT_SCHEMA_VERSION, RunHealth, RunMode, RunReport, RunStatus,
-    STATE_SCHEMA_VERSION, Severity, SystemClock, TargetReport, TargetStatus, TransitionKind,
-    evaluate_aggregate, evaluate_target, local_time_bucket,
+    STATE_SCHEMA_VERSION, Severity, SystemClock, TargetAuth, TargetReport, TargetStatus,
+    TransitionKind, evaluate_aggregate, evaluate_target, local_time_bucket,
 };
 use sentinel_store::{NotificationAttemptOutcome, StateStore, canonical_state_schema};
 use tracing_subscriber::EnvFilter;
@@ -273,12 +273,11 @@ async fn check_with_sink(
                         format!("authentication retry is paused for {remaining} seconds"),
                     );
                 }
-                let policy = policies
-                    .get(&target.policy)
-                    .expect("configuration policy references were validated");
-                let password = passwords
-                    .get(&target.id)
-                    .expect("every target password was loaded");
+                let policy = target
+                    .policy
+                    .as_ref()
+                    .and_then(|policy| policies.get(policy));
+                let password = passwords.get(&target.id);
                 match client
                     .observe(
                         &target,
@@ -306,10 +305,10 @@ async fn check_with_sink(
             .iter()
             .find(|report| report.id == target.id)
             .expect("every configured target has a report");
-        let policy = config
-            .policies
-            .get(&target.policy)
-            .expect("validated policy reference");
+        let policy = target
+            .policy
+            .as_ref()
+            .and_then(|policy| config.policies.get(policy));
         let profile = config
             .condition_profiles
             .get(&target.condition_profile)
@@ -323,25 +322,30 @@ async fn check_with_sink(
         ));
     }
 
-    let (local_hour, utc_offset_minutes) =
-        local_time_bucket(started, &config.behavioral_baseline.time_zone).map_err(|error| {
-            CommandError::invocation(anyhow!("invalid behavior time zone: {error}"))
-        })?;
     let cutoff_unix_seconds =
         now_unix_seconds.saturating_sub(i64::from(config.state.retention_days) * 86_400);
-    let baseline_samples = store
-        .load_baseline_samples(cutoff_unix_seconds)
-        .map_err(CommandError::state)?;
-    let aggregate_profile = baseline_profile(&config).map_err(CommandError::invocation)?;
-    let aggregate_evaluation = evaluate_aggregate(
-        &config.behavioral_baseline,
-        aggregate_profile,
-        &baseline_samples,
-        &targets,
-        now_unix_seconds,
-        local_hour,
-        utc_offset_minutes,
-    );
+    let aggregate_evaluation = if let Some(baseline) = &config.behavioral_baseline {
+        let (local_hour, utc_offset_minutes) = local_time_bucket(started, &baseline.time_zone)
+            .map_err(|error| {
+                CommandError::invocation(anyhow!("invalid behavior time zone: {error}"))
+            })?;
+        let baseline_samples = store
+            .load_baseline_samples(cutoff_unix_seconds)
+            .map_err(CommandError::state)?;
+        let aggregate_profile =
+            baseline_profile(&config, baseline).map_err(CommandError::invocation)?;
+        evaluate_aggregate(
+            baseline,
+            aggregate_profile,
+            &baseline_samples,
+            &targets,
+            now_unix_seconds,
+            local_hour,
+            utc_offset_minutes,
+        )
+    } else {
+        None
+    };
     let aggregate = aggregate_evaluation
         .as_ref()
         .map(|value| value.observation.clone());
@@ -623,7 +627,14 @@ fn versioned_schema<T: serde::Serialize>(
 fn read_target_passwords(config: &Config) -> anyhow::Result<BTreeMap<String, SecretString>> {
     let mut passwords = BTreeMap::new();
     for target in &config.targets {
-        let metadata = fs::metadata(&target.password_file)
+        if target.auth == TargetAuth::None {
+            continue;
+        }
+        let password_file = target
+            .password_file
+            .as_deref()
+            .ok_or_else(|| anyhow!("target {} has no password file", target.id))?;
+        let metadata = fs::metadata(password_file)
             .with_context(|| format!("cannot inspect password file for target {}", target.id))?;
         if !metadata.is_file() || metadata.len() == 0 {
             return Err(anyhow!(
@@ -631,7 +642,7 @@ fn read_target_passwords(config: &Config) -> anyhow::Result<BTreeMap<String, Sec
                 target.id
             ));
         }
-        let password = fs::read_to_string(&target.password_file)
+        let password = fs::read_to_string(password_file)
             .with_context(|| format!("cannot read password file for target {}", target.id))?
             .trim_end_matches(['\r', '\n'])
             .to_owned();
@@ -653,9 +664,11 @@ fn incomplete_report(target: &sentinel_core::TargetConfig, error: &AdGuardError)
     )
 }
 
-fn baseline_profile(config: &Config) -> anyhow::Result<&sentinel_core::ConditionProfile> {
-    let first = config
-        .behavioral_baseline
+fn baseline_profile<'config>(
+    config: &'config Config,
+    baseline: &sentinel_core::config::BehavioralBaselineConfig,
+) -> anyhow::Result<&'config sentinel_core::ConditionProfile> {
+    let first = baseline
         .target_ids
         .first()
         .ok_or_else(|| anyhow!("behavioral target group is empty"))?;
@@ -776,8 +789,8 @@ mod tests {
     use httpmock::{Mock, MockServer};
     use jiff::Timestamp;
     use sentinel_core::{
-        Config, FixedClock, NotificationStatus, OutboxMessage, RunReport, RunStatus, TargetStatus,
-        TransitionKind,
+        Config, EvaluationOutcome, FixedClock, NotificationStatus, OutboxMessage, RunReport,
+        RunStatus, TargetStatus, TransitionKind,
     };
     use sentinel_store::{NotificationAttemptOutcome, StateStore};
     use tempfile::{TempDir, tempdir};
@@ -1038,6 +1051,25 @@ allow_insecure_local_http = false
             .expect("one persisted report")
     }
 
+    fn rewrite_config(harness: &Harness, from: &str, to: &str) {
+        let text = fs::read_to_string(&harness.config_path).expect("config");
+        assert!(text.contains(from), "config does not contain {from:?}");
+        fs::write(&harness.config_path, text.replace(from, to)).expect("rewritten config");
+    }
+
+    fn omit_behavioral_baseline(harness: &Harness) {
+        let text = fs::read_to_string(&harness.config_path).expect("config");
+        let baseline = r#"[behavioral_baseline]
+target_ids = ["resolver-a"]
+time_zone = "Europe/Amsterdam"
+learning_days = 7
+minimum_same_hour_samples = 36
+"#;
+        assert!(text.contains(baseline));
+        fs::write(&harness.config_path, text.replace(baseline, ""))
+            .expect("config without baseline");
+    }
+
     #[tokio::test]
     async fn a_healthy_run_exits_zero_without_findings() {
         let server = MockServer::start_async().await;
@@ -1069,6 +1101,114 @@ allow_insecure_local_http = false
     }
 
     #[tokio::test]
+    async fn a_v0_1_3_configuration_keeps_its_target_evaluations() {
+        let server = MockServer::start_async().await;
+        let mocks = serve_golden(&server).await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+
+        let code = run(&harness, FailOn::Never).await.expect("healthy run");
+
+        assert_eq!(code, 0);
+        let report = latest_report(&harness);
+        let target_evaluations: Vec<_> = report
+            .evaluations
+            .iter()
+            .filter(|evaluation| evaluation.target_id.as_deref() == Some("resolver-a"))
+            .map(|evaluation| {
+                (
+                    evaluation.id.as_str(),
+                    evaluation.kind.as_str(),
+                    evaluation.reason.as_str(),
+                    evaluation.outcome,
+                )
+            })
+            .collect();
+        assert_eq!(
+            target_evaluations,
+            [
+                (
+                    "target:resolver-a:api",
+                    "api",
+                    "available",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:processing-latency",
+                    "processing_latency",
+                    "within_threshold",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:protection",
+                    "protection",
+                    "enabled",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:rewrites-enabled",
+                    "rewrite_settings",
+                    "matches_policy",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:upstream-latency",
+                    "upstream_latency",
+                    "within_threshold",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:upstream-mode",
+                    "upstream_mode",
+                    "matches_policy",
+                    EvaluationOutcome::Clear,
+                ),
+                (
+                    "target:resolver-a:upstream-set",
+                    "upstream_set",
+                    "matches_policy",
+                    EvaluationOutcome::Clear,
+                ),
+            ]
+        );
+        for mock in mocks {
+            mock.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_omitted_behavioral_baseline_produces_no_aggregate_evaluations() {
+        let server = MockServer::start_async().await;
+        let mocks = serve_golden(&server).await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+        omit_behavioral_baseline(&harness);
+
+        let code = run(&harness, FailOn::Never).await.expect("healthy run");
+
+        assert_eq!(code, 0);
+        let report = latest_report(&harness);
+        assert!(report.aggregate.is_none());
+        assert!(
+            report
+                .evaluations
+                .iter()
+                .all(|evaluation| !evaluation.id.starts_with("aggregate:"))
+        );
+        for mock in mocks {
+            mock.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
     async fn an_active_finding_exits_one_only_when_fail_on_matches() {
         let server = MockServer::start_async().await;
         let _mocks = serve_golden(&server).await;
@@ -1092,6 +1232,69 @@ allow_insecure_local_http = false
 
         let above_threshold = run(&harness, FailOn::Error).await.expect("run");
         assert_eq!(above_threshold, 0);
+    }
+
+    /// ADR 0011: withdrawing a declaration is not a recovery. The condition
+    /// disappears from the report, but its latch is neither resolved nor reset,
+    /// so restoring the declaration resumes the retained state rather than
+    /// alerting a second time.
+    #[tokio::test]
+    async fn a_withdrawn_declaration_retains_its_latch_instead_of_resolving() {
+        let server = MockServer::start_async().await;
+        let _mocks = serve_golden(&server).await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+        let declaration = format!("upstream_mode = \"{DRIFTED_MODE}\"\n");
+
+        run_at(&harness, "2027-01-15T08:00:00Z")
+            .await
+            .expect("alert run");
+        let alerted = latest_report(&harness);
+        assert_eq!(alerted.transitions.len(), 1);
+        assert_eq!(alerted.transitions[0].kind, TransitionKind::Alert);
+        assert_eq!(
+            alerted.transitions[0].condition_id,
+            "target:resolver-a:upstream-mode"
+        );
+
+        // Withdraw the declaration. The row goes away; nothing resolves.
+        rewrite_config(&harness, &declaration, "");
+        run_at(&harness, "2027-01-15T08:05:00Z")
+            .await
+            .expect("withdrawn run");
+        let withdrawn = latest_report(&harness);
+        assert!(
+            withdrawn
+                .evaluations
+                .iter()
+                .all(|evaluation| evaluation.kind != "upstream_mode")
+        );
+        assert!(
+            withdrawn.transitions.is_empty(),
+            "a withdrawal is not a resolution"
+        );
+        assert!(withdrawn.findings.is_empty());
+
+        // Restore it. A retained firing latch emits no second alert; a latch
+        // that had been reset would sustain to one run and alert again.
+        rewrite_config(
+            &harness,
+            "[policies.test]\n",
+            &format!("[policies.test]\n{declaration}"),
+        );
+        run_at(&harness, "2027-01-15T08:10:00Z")
+            .await
+            .expect("restored run");
+        let restored = latest_report(&harness);
+        assert!(
+            restored
+                .findings
+                .iter()
+                .any(|finding| finding.kind == "upstream_mode" && finding.reason == "drift")
+        );
+        assert!(
+            restored.transitions.is_empty(),
+            "the retained latch must not re-alert"
+        );
     }
 
     #[tokio::test]

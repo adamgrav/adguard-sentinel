@@ -21,7 +21,7 @@ different configuration working.
 | macOS | `aarch64` | Development only | Nix flake | **Verified**: package built and full suite run |
 | Linux | `x86_64` | Deployment and development | Nix flake | **Verified** in CI |
 | Linux | `x86_64` | Deployment and development | Source build with rustup | **Verified** in CI |
-| Linux | `aarch64` | — | — | **Unsupported** |
+| Linux | `aarch64` | Deployment and development | Nix flake | **Pending**: a native CI job exists, but no green run is recorded yet |
 | macOS | any | Deployment | — | **Unsupported**: no systemd, so no supported scheduling path |
 | Windows | any | — | — | **Unsupported** |
 
@@ -29,16 +29,18 @@ macOS is a development platform only. The package builds and the whole suite run
 there, which is why it is listed, but there is no supported way to schedule
 Sentinel on it.
 
-Both Linux rows are re-established on every push to `main`, because CI builds the
-flake package and runs a separate non-Nix source build on each one. A row is
-marked **Verified** only for a configuration with a recorded green run, never by
-inference from a related one passing.
+The two `x86_64` Linux rows are re-established on every push to `main`: one CI
+job builds the flake package and runs the full suite, and a separate job uses
+rustup. The `aarch64` flake output evaluates locally and has the same native Nix
+CI job on `ubuntu-24.04-arm`, but it stays **Pending** until that job records a
+green run. A row is marked **Verified** only for that exact configuration, never
+by inference from a related one passing.
 
 ## Toolchain
 
 | Item | Value | Notes |
 | --- | --- | --- |
-| Rust | `1.97.1` | Pinned in `rust-toolchain.toml`; both CI jobs use exactly this version |
+| Rust | `1.97.1` | Pinned in `rust-toolchain.toml`; every Rust CI job uses exactly this version |
 | Edition | 2024 | |
 | Build inputs | C compiler and linker | SQLite is compiled from source through `rusqlite`'s bundled feature |
 | Nix | flake with `nixpkgs` `nixos-26.05` | Pinned in `flake.lock` |
@@ -67,6 +69,17 @@ switch exists so that a new AdGuard Home minor release does not leave you with n
 option but to stop monitoring, and so that the untested choice is recorded in the
 configuration rather than made silently.
 
+## API authentication
+
+| Mode | Status |
+| --- | --- |
+| `none` | Supported. No username or password file is loaded, and no `Authorization` header is sent |
+| `basic` | Supported. Username plus a non-empty password file are required; credentials never come from arguments or environment variables |
+
+Omitting `auth` retains the pre-0.2 behavior and selects `basic`. Explicitly use
+`auth = "none"` for an unauthenticated resolver or for a trusted proxy or VPN
+boundary that does not need an AdGuard credential.
+
 ## Runtime dependencies
 
 A built binary has none beyond libc. Specifically:
@@ -84,8 +97,7 @@ A built binary has none beyond libc. Specifically:
 | Pushover | Supported, and the only provider in this release |
 | Anything else | **Unsupported** |
 
-Notifications can also be disabled entirely, which is the default in
-`config.example.toml`.
+Notifications can also be disabled entirely, which is the configuration default.
 
 ## Scheduling
 

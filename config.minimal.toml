@@ -1,0 +1,7 @@
+schema_version = 1
+
+[[targets]]
+id = "resolver"
+name = "Home resolver"
+base_url = "https://resolver.example.invalid"
+auth = "none"

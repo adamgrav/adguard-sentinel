@@ -203,34 +203,41 @@
       "additionalProperties": false,
       "properties": {
         "filters": {
+          "default": [],
           "items": {
             "$ref": "#/$defs/RequiredFilter"
           },
           "type": "array"
         },
         "protection_enabled": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "rewrites": {
-          "$ref": "#/$defs/RequiredRewrites"
+          "$ref": "#/$defs/RequiredRewrites",
+          "default": {
+            "enabled": null,
+            "required": []
+          }
         },
         "upstream_dns": {
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "upstream_mode": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "protection_enabled",
-        "upstream_mode",
-        "upstream_dns",
-        "filters",
-        "rewrites"
-      ],
       "type": "object"
     },
     "PushoverConfig": {
@@ -297,19 +304,19 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "required": {
+          "default": [],
           "items": {
             "$ref": "#/$defs/RequiredRewrite"
           },
           "type": "array"
         }
       },
-      "required": [
-        "enabled",
-        "required"
-      ],
       "type": "object"
     },
     "StateConfig": {
@@ -330,16 +337,29 @@
       ],
       "type": "object"
     },
+    "TargetAuth": {
+      "enum": [
+        "none",
+        "basic"
+      ],
+      "type": "string"
+    },
     "TargetConfig": {
       "additionalProperties": false,
       "properties": {
         "allow_insecure_local_http": {
+          "default": false,
           "type": "boolean"
+        },
+        "auth": {
+          "$ref": "#/$defs/TargetAuth",
+          "default": "basic"
         },
         "base_url": {
           "type": "string"
         },
         "condition_profile": {
+          "default": "current",
           "type": "string"
         },
         "id": {
@@ -349,24 +369,28 @@
           "type": "string"
         },
         "password_file": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "policy": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "username": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "id",
         "name",
-        "base_url",
-        "username",
-        "password_file",
-        "policy",
-        "condition_profile",
-        "allow_insecure_local_http"
+        "base_url"
       ],
       "type": "object"
     }
@@ -376,31 +400,74 @@
   "additionalProperties": false,
   "properties": {
     "behavioral_baseline": {
-      "$ref": "#/$defs/BehavioralBaselineConfig"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BehavioralBaselineConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "condition_profiles": {
       "additionalProperties": {
         "$ref": "#/$defs/ConditionProfile"
       },
+      "default": {
+        "current": {
+          "api_unavailable_sustain_runs": 4,
+          "authentication_rejected_sustain_runs": 1,
+          "authentication_retry_seconds": 900,
+          "behavioral_anomaly_sustain_runs": 4,
+          "invalid_response_sustain_runs": 1,
+          "policy_drift_sustain_runs": 4,
+          "processing_latency_ms": 500,
+          "processing_latency_sustain_runs": 4,
+          "protection_disabled_sustain_runs": 2,
+          "recovery_runs": 1,
+          "unsupported_version_sustain_runs": 1,
+          "upstream_latency_ms": 750,
+          "upstream_latency_sustain_runs": 4
+        }
+      },
       "type": "object"
     },
     "notifications": {
-      "$ref": "#/$defs/NotificationConfig"
+      "$ref": "#/$defs/NotificationConfig",
+      "default": {
+        "provider": "disabled",
+        "pushover": null
+      }
     },
     "observation": {
-      "$ref": "#/$defs/ObservationConfig"
+      "$ref": "#/$defs/ObservationConfig",
+      "default": {
+        "adguard_version_requirement": ">=0.107.78,<0.108.0",
+        "allow_untested_adguard_version": false,
+        "max_response_bytes": 4194304,
+        "minimum_complete_targets": 1,
+        "notification_timeout_ms": 15000,
+        "request_timeout_ms": 5000,
+        "stats_lookback_ms": 3600000,
+        "target_concurrency": 2
+      }
     },
     "policies": {
       "additionalProperties": {
         "$ref": "#/$defs/PolicyConfig"
       },
+      "default": {},
       "type": "object"
     },
     "schema_version": {
       "const": 1
     },
     "state": {
-      "$ref": "#/$defs/StateConfig"
+      "$ref": "#/$defs/StateConfig",
+      "default": {
+        "path": "/var/lib/adguard-sentinel/state.sqlite",
+        "retention_days": 21
+      }
     },
     "targets": {
       "items": {
@@ -411,12 +478,6 @@
   },
   "required": [
     "schema_version",
-    "state",
-    "observation",
-    "behavioral_baseline",
-    "condition_profiles",
-    "notifications",
-    "policies",
     "targets"
   ],
   "title": "Config",

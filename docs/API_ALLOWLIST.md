@@ -1,8 +1,10 @@
 # Read-only API allowlist
 
 The AdGuard adapter has exactly six private endpoint variants. All requests use
-GET, Basic authentication, `Accept: application/json`, `Accept-Encoding:
-identity`, no proxy, no redirects, a bounded timeout, and a bounded body.
+GET, `Accept: application/json`, `Accept-Encoding: identity`, no proxy, no
+redirects, a bounded timeout, and a bounded body. `auth = "basic"` adds HTTP
+Basic authentication from the configured credential file. `auth = "none"`
+sends no `Authorization` header.
 
 | Request | Data retained |
 | --- | --- |
