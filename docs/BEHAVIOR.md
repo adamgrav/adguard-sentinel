@@ -27,9 +27,14 @@ a behavior change that must be reflected here and in the run-report schema:
   Home resets its statistics counter on its own local hour, so one sample is a
   partial hour total whose size depends on when in the hour it was taken. A
   window is the difference between two consecutive samples.
-- A pair yields no window when the counter decreased, which means the reset fell
-  between the samples, or when more than 600 seconds separate them, which means
-  runs were missed. Such a run leaves every behavioural condition not evaluated,
+- Windows difference integer counts. A window's blocked ratio is its own
+  blocked count over its own query count, never a ratio reconstructed from a
+  cumulative one.
+- The group total is the sum of its declared members for runs where every member
+  reported. A run missing a member contributes no combined reading.
+- A pair yields no window when either counter decreased, which means the reset
+  fell between the samples, when more blocked than queried lands in the window,
+  or when more than 600 seconds separate them, which means runs were missed. Such a run leaves every behavioural condition not evaluated,
   so it neither increments, clears, nor resolves.
 - The baseline requires the configured age and the configured count of
   same-local-hour windows. It uses median, scaled MAD `1.4826`, and a deviation

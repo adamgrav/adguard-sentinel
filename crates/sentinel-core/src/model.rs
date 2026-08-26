@@ -160,15 +160,15 @@ pub struct BaselineSample {
 
 /// One persisted per-target statistics reading.
 ///
-/// Like `BaselineSample` this holds the raw cumulative counter that `AdGuard`
-/// Home reported, not a rate. Rates are derived on read by differencing
-/// consecutive readings; see ADR 0012.
+/// Holds the raw cumulative counters that `AdGuard Home` reported, not rates.
+/// Rates are derived on read by differencing consecutive readings; see ADR 0012.
+/// Counts are kept as integers so that differencing is exact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TargetSample {
     pub target_id: String,
     pub timestamp: i64,
     pub queries: u64,
-    pub blocked_ratio: f64,
+    pub blocked: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

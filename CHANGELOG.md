@@ -28,6 +28,11 @@ Notable changes to AdGuard Sentinel. The format follows
 
 ### Added
 
+- Behavioural windows difference integer counts, and the group total is summed
+  from its declared members rather than taken from a stored combined ratio.
+  Reconstructing a blocked count from a ratio and differencing two of those can
+  round to zero, which is indistinguishable from blocking having stopped on a
+  condition that pages.
 - Per-target behavioural conditions `target:<id>:query-rate`,
   `target:<id>:blocked-ratio`, and `target:<id>:blocking-collapsed`, for targets
   named in `[behavioral_baseline].target_ids`. A group total dilutes a single

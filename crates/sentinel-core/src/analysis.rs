@@ -74,32 +74,28 @@ impl RateWindow {
 /// `RATE_WINDOW_MAXIMUM_SECONDS` spans missed runs. Both are skipped rather
 /// than estimated, because guessing the reset boundary would bias the rate in
 /// a direction that depends on the resolver timezone.
-pub fn rate_window(previous: &BaselineSample, current: &BaselineSample) -> Option<RateWindow> {
-    window_between(
-        (
-            previous.timestamp,
-            previous.combined_queries,
-            previous.combined_blocked_ratio,
-        ),
-        (
-            current.timestamp,
-            current.combined_queries,
-            current.combined_blocked_ratio,
-        ),
-        current.local_hour,
-    )
-}
-
-/// Shared window derivation for the group aggregate and for one target. Each
-/// tuple is `(timestamp, cumulative queries, cumulative blocked ratio)`.
+/// Derives the measurement window between two consecutive readings. Each tuple
+/// is `(timestamp, cumulative queries, cumulative blocked)`.
+///
+/// Returns `None` when the pair cannot describe one: a counter that went
+/// backwards means `AdGuard Home` reset its statistics between the readings and
+/// the elapsed traffic is unknowable, and a gap longer than
+/// `RATE_WINDOW_MAXIMUM_SECONDS` spans missed runs. Both are skipped rather
+/// than estimated, because guessing the reset boundary would bias the rate in
+/// a direction that depends on the resolver timezone.
+///
+/// Counts are differenced as integers. Reconstructing a count from a stored
+/// ratio and differencing that would subtract two large nearly-equal floats to
+/// recover a small one, and rounding could then present as a blocked count of
+/// zero, which is indistinguishable from blocking having stopped.
 fn window_between(
-    previous: (i64, u64, f64),
-    current: (i64, u64, f64),
+    previous: (i64, u64, u64),
+    current: (i64, u64, u64),
     local_hour: u8,
 ) -> Option<RateWindow> {
-    let (previous_timestamp, previous_queries, previous_ratio) = previous;
-    let (current_timestamp, current_queries, current_ratio) = current;
-    if current_queries < previous_queries {
+    let (previous_timestamp, previous_queries, previous_blocked) = previous;
+    let (current_timestamp, current_queries, current_blocked) = current;
+    if current_queries < previous_queries || current_blocked < previous_blocked {
         return None;
     }
     let elapsed = (current_timestamp - previous_timestamp) as f64;
@@ -107,12 +103,14 @@ fn window_between(
         return None;
     }
     let queries = current_queries - previous_queries;
-    let blocked =
-        (current_queries as f64 * current_ratio) - (previous_queries as f64 * previous_ratio);
+    let blocked = current_blocked - previous_blocked;
+    if blocked > queries {
+        return None;
+    }
     let blocked_ratio = if queries == 0 {
         0.0
     } else {
-        (blocked / queries as f64).clamp(0.0, 1.0)
+        blocked as f64 / queries as f64
     };
     Some(RateWindow {
         local_hour,
@@ -121,6 +119,42 @@ fn window_between(
         query_rate: queries as f64 / elapsed,
         blocked_ratio,
     })
+}
+
+/// Sums the declared group members per run into one combined reading, keeping
+/// only runs where every member reported, oldest first.
+///
+/// The group aggregate is the sum of its members, so summing exact per-target
+/// counts avoids reconstructing anything. A run missing a member is dropped
+/// rather than summed over what is present, which would read as a fall in
+/// traffic that never happened.
+fn combined_readings(
+    config: &BehavioralBaselineConfig,
+    samples: &[TargetSample],
+) -> Vec<(i64, u64, u64)> {
+    let mut per_run: BTreeMap<i64, (usize, u64, u64)> = BTreeMap::new();
+    for sample in samples {
+        if !config.target_ids.iter().any(|id| id == &sample.target_id) {
+            continue;
+        }
+        let entry = per_run.entry(sample.timestamp).or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 = entry.1.saturating_add(sample.queries);
+        entry.2 = entry.2.saturating_add(sample.blocked);
+    }
+    per_run
+        .into_iter()
+        .filter(|(_, (members, _, _))| *members == config.target_ids.len())
+        .map(|(timestamp, (_, queries, blocked))| (timestamp, queries, blocked))
+        .collect()
+}
+
+/// The local hour a timestamp falls in, or `None` if it cannot be resolved.
+fn local_hour_of(timestamp: i64, time_zone: &str) -> Option<u8> {
+    Timestamp::from_second(timestamp)
+        .ok()
+        .and_then(|value| local_time_bucket(value, time_zone).ok())
+        .map(|(hour, _)| hour)
 }
 
 pub fn robust_bounds(values: &[f64]) -> Option<(f64, f64)> {
@@ -832,34 +866,24 @@ pub fn evaluate_target_behavior(
         .iter()
         .filter(|sample| sample.target_id == report.id)
         .collect();
-    let hour_of = |timestamp: i64| {
-        Timestamp::from_second(timestamp)
-            .ok()
-            .and_then(|value| local_time_bucket(value, &config.time_zone).ok())
-            .map(|(hour, _)| hour)
-    };
     let history: Vec<RateWindow> = mine
         .windows(2)
         .filter_map(|pair| {
-            let hour = hour_of(pair[1].timestamp)?;
+            let hour = local_hour_of(pair[1].timestamp, &config.time_zone)?;
             if hour != local_hour {
                 return None;
             }
             window_between(
-                (pair[0].timestamp, pair[0].queries, pair[0].blocked_ratio),
-                (pair[1].timestamp, pair[1].queries, pair[1].blocked_ratio),
+                (pair[0].timestamp, pair[0].queries, pair[0].blocked),
+                (pair[1].timestamp, pair[1].queries, pair[1].blocked),
                 hour,
             )
         })
         .collect();
     let current = mine.last().and_then(|previous| {
         window_between(
-            (previous.timestamp, previous.queries, previous.blocked_ratio),
-            (
-                now_unix_seconds,
-                operational.queries,
-                operational.blocked_ratio,
-            ),
+            (previous.timestamp, previous.queries, previous.blocked),
+            (now_unix_seconds, operational.queries, operational.blocked),
             local_hour,
         )
     });
@@ -882,6 +906,7 @@ pub fn evaluate_aggregate(
     config: &BehavioralBaselineConfig,
     profile: &ConditionProfile,
     retained_samples: &[BaselineSample],
+    target_samples: &[TargetSample],
     target_reports: &[TargetReport],
     now_unix_seconds: i64,
     local_hour: u8,
@@ -953,20 +978,24 @@ pub fn evaluate_aggregate(
         resolver_query_share,
         top_client_share,
     };
-    let current_sample = BaselineSample {
-        timestamp: now_unix_seconds,
-        local_hour,
-        combined_queries,
-        combined_blocked_ratio,
-    };
-    let history: Vec<RateWindow> = retained_samples
+    let readings = combined_readings(config, target_samples);
+    let history: Vec<RateWindow> = readings
         .windows(2)
-        .filter_map(|pair| rate_window(&pair[0], &pair[1]))
-        .filter(|window| window.local_hour == local_hour)
+        .filter_map(|pair| {
+            let hour = local_hour_of(pair[1].0, &config.time_zone)?;
+            if hour != local_hour {
+                return None;
+            }
+            window_between(pair[0], pair[1], hour)
+        })
         .collect();
-    let current = retained_samples
-        .last()
-        .and_then(|previous| rate_window(previous, &current_sample));
+    let current = readings.last().and_then(|previous| {
+        window_between(
+            *previous,
+            (now_unix_seconds, combined_queries, combined_blocked),
+            local_hour,
+        )
+    });
     let (evaluations, limits) = behavioral_evaluations(
         &BehavioralSubject::aggregate(),
         profile,
@@ -1239,8 +1268,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        advance_condition, evaluate_aggregate, evaluate_target_behavior, local_time_bucket,
-        rate_window, robust_bounds,
+        advance_condition, combined_readings, evaluate_aggregate, evaluate_target_behavior,
+        local_time_bucket, robust_bounds, window_between,
     };
     use crate::config::{
         BehavioralBaselineConfig, ConditionProfile, PolicyConfig, RequiredFilter, RequiredRewrite,
@@ -1338,131 +1367,98 @@ mod tests {
         assert_eq!(resolution.kind, TransitionKind::Resolution);
     }
 
-    /// A steady resolver: one query per second, a tenth of them blocked, sampled
-    /// every 300 seconds. The first sample is seven days back so the baseline is
-    /// old enough; the gap to the second is skipped as a window.
-    fn steady_samples(queries_per_window: u64, ratio: f64) -> Vec<BaselineSample> {
-        let now = 1_800_000_000;
-        let mut samples = vec![BaselineSample {
-            timestamp: now - 7 * 86_400 - 300,
-            local_hour: 10,
-            combined_queries: 0,
-            combined_blocked_ratio: ratio,
-        }];
-        for index in 0..40u64 {
-            samples.push(BaselineSample {
-                timestamp: now - (40 - i64::try_from(index).expect("index")) * 300,
-                local_hour: 10,
-                combined_queries: index * queries_per_window,
-                combined_blocked_ratio: ratio,
-            });
+    /// Eight days of a two-resolver group across the 09:00 local hour, at a
+    /// steady 1.0 combined queries per second with a tenth blocked, sampled
+    /// every 300 seconds. Each resolver contributes half.
+    fn aggregate_history() -> (Vec<BaselineSample>, Vec<TargetSample>) {
+        let mut baseline = Vec::new();
+        let mut targets = Vec::new();
+        for day in 0..8i64 {
+            for slot in 1..=12i64 {
+                let timestamp = HOUR_NINE - day * 86_400 - slot * 300;
+                let queries = u64::try_from((13 - slot) * 300).expect("queries");
+                baseline.push(BaselineSample {
+                    timestamp,
+                    local_hour: 9,
+                    combined_queries: queries,
+                    combined_blocked_ratio: 0.1,
+                });
+                for id in ["a", "b"] {
+                    targets.push(TargetSample {
+                        target_id: id.to_owned(),
+                        timestamp,
+                        queries: queries / 2,
+                        blocked: queries / 20,
+                    });
+                }
+            }
         }
-        samples
+        baseline.sort_by_key(|sample| sample.timestamp);
+        targets.sort_by_key(|sample| sample.timestamp);
+        (baseline, targets)
+    }
+
+    fn group_config() -> BehavioralBaselineConfig {
+        BehavioralBaselineConfig {
+            target_ids: vec!["a".to_owned(), "b".to_owned()],
+            time_zone: "Europe/Amsterdam".to_owned(),
+            learning_days: 7,
+            minimum_same_hour_samples: 36,
+        }
     }
 
     #[test]
     fn a_sawtooth_counter_yields_one_flat_rate() {
-        // The defect this release exists for: AdGuard resets its counter on the
-        // local hour, so the raw value ramps from nothing to a full hour total
-        // and back. Differencing has to read the same rate at both ends.
-        let base = BaselineSample {
-            timestamp: 0,
-            local_hour: 10,
-            combined_queries: 0,
-            combined_blocked_ratio: 0.1,
-        };
-        let early = rate_window(
-            &BaselineSample {
-                timestamp: 60,
-                combined_queries: 60,
-                ..base
-            },
-            &BaselineSample {
-                timestamp: 360,
-                combined_queries: 360,
-                ..base
-            },
-        )
-        .expect("window early in the hour");
-        let late = rate_window(
-            &BaselineSample {
-                timestamp: 3_000,
-                combined_queries: 3_000,
-                ..base
-            },
-            &BaselineSample {
-                timestamp: 3_300,
-                combined_queries: 3_300,
-                ..base
-            },
-        )
-        .expect("window late in the hour");
+        // AdGuard resets its counter on the local hour, so the raw value ramps
+        // from nothing to a full hour total and back. Differencing must read the
+        // same rate at both ends of that ramp.
+        let early = window_between((60, 60, 6), (360, 360, 36), 9).expect("early window");
+        let late =
+            window_between((3_000, 3_000, 300), (3_300, 3_300, 330), 9).expect("late window");
         assert!((early.query_rate - 1.0).abs() < 1e-9);
         assert!((late.query_rate - 1.0).abs() < 1e-9);
+        assert!((early.blocked_ratio - late.blocked_ratio).abs() < 1e-9);
     }
 
     #[test]
-    fn a_counter_reset_produces_no_window() {
-        let base = BaselineSample {
-            timestamp: 0,
-            local_hour: 10,
-            combined_queries: 0,
-            combined_blocked_ratio: 0.1,
-        };
+    fn a_counter_reset_or_a_long_gap_produces_no_window() {
         assert_eq!(
-            rate_window(
-                &BaselineSample {
-                    timestamp: 3_500,
-                    combined_queries: 3_500,
-                    ..base
-                },
-                &BaselineSample {
-                    timestamp: 3_800,
-                    combined_queries: 120,
-                    ..base
-                },
-            ),
+            window_between((3_500, 3_500, 350), (3_800, 120, 12), 9),
             None,
-            "a decreasing counter is a reset and its elapsed traffic is unknowable",
+            "a decreasing query counter is a reset",
         );
         assert_eq!(
-            rate_window(
-                &BaselineSample {
-                    timestamp: 0,
-                    combined_queries: 0,
-                    ..base
-                },
-                &BaselineSample {
-                    timestamp: 900,
-                    combined_queries: 900,
-                    ..base
-                },
-            ),
+            window_between((3_500, 3_500, 350), (3_800, 3_900, 12), 9),
+            None,
+            "a decreasing blocked counter is a reset even when queries rose",
+        );
+        assert_eq!(
+            window_between((0, 0, 0), (900, 900, 90), 9),
             None,
             "a gap longer than one run interval spans missed runs",
+        );
+        assert_eq!(
+            window_between((0, 100, 10), (300, 200, 150), 9),
+            None,
+            "more blocked than queried in a window is inconsistent",
         );
     }
 
     #[test]
     fn aggregate_rate_threshold_equality_is_clear_and_above_is_active() {
-        let now = 1_800_000_000;
-        let samples = steady_samples(300, 0.1);
-        let config = BehavioralBaselineConfig {
-            target_ids: vec!["a".to_owned(), "b".to_owned()],
-            time_zone: "Europe/Amsterdam".to_owned(),
-            learning_days: 7,
-            minimum_same_hour_samples: 36,
-        };
+        let (baseline, targets) = aggregate_history();
+        let config = group_config();
         let profile = profile();
-        // Baseline rate is 1.0/s with no dispersion, so the limit is 3 x median.
-        // 900 queries over the 300 second window is exactly 3.0/s.
+        // The baseline rate is 1.0/s with no dispersion, so the limit is 3 x
+        // median. 900 queries over the 300 second window is exactly 3.0/s.
         let at_limit = evaluate_aggregate(
             &config,
             &profile,
-            &samples,
-            &[target("a", 6_300, 630), target("b", 6_300, 630)],
-            now,
-            10,
+            &baseline,
+            &targets,
+            &[target("a", 2_250, 225), target("b", 2_250, 225)],
+            HOUR_NINE,
+            9,
             60,
         )
         .expect("aggregate");
@@ -1472,10 +1468,11 @@ mod tests {
         let above_limit = evaluate_aggregate(
             &config,
             &profile,
-            &samples,
-            &[target("a", 6_300, 630), target("b", 6_301, 630)],
-            now,
-            10,
+            &baseline,
+            &targets,
+            &[target("a", 2_251, 225), target("b", 2_250, 225)],
+            HOUR_NINE,
+            9,
             60,
         )
         .expect("aggregate");
@@ -1487,24 +1484,20 @@ mod tests {
 
     #[test]
     fn blocking_collapse_is_active_and_survives_an_absolute_floor() {
-        // The gap that motivated the release. Blocking stops entirely while
-        // every policy condition stays clear. A 0.20 absolute deviation floor
-        // could never see this, because the deviation is only the median itself.
-        let now = 1_800_000_000;
-        let samples = steady_samples(300, 0.1);
-        let config = BehavioralBaselineConfig {
-            target_ids: vec!["a".to_owned(), "b".to_owned()],
-            time_zone: "Europe/Amsterdam".to_owned(),
-            learning_days: 7,
-            minimum_same_hour_samples: 36,
-        };
+        // Blocking stops entirely while every policy condition stays clear. The
+        // cumulative blocked counter holds still while queries keep rising,
+        // which is what a collapse looks like on a monotonic counter. A
+        // deviation floor at or above the median cannot see this, because a
+        // collapse to zero deviates by exactly the median and no more.
+        let (baseline, targets) = aggregate_history();
         let collapsed = evaluate_aggregate(
-            &config,
+            &group_config(),
             &profile(),
-            &samples,
-            &[target("a", 6_000, 0), target("b", 6_000, 0)],
-            now,
-            10,
+            &baseline,
+            &targets,
+            &[target("a", 2_250, 180), target("b", 2_250, 180)],
+            HOUR_NINE,
+            9,
             60,
         )
         .expect("aggregate");
@@ -1523,26 +1516,36 @@ mod tests {
 
     #[test]
     fn sustained_blocking_leaves_both_ratio_conditions_clear() {
-        let now = 1_800_000_000;
-        let samples = steady_samples(300, 0.1);
-        let config = BehavioralBaselineConfig {
-            target_ids: vec!["a".to_owned(), "b".to_owned()],
-            time_zone: "Europe/Amsterdam".to_owned(),
-            learning_days: 7,
-            minimum_same_hour_samples: 36,
-        };
+        let (baseline, targets) = aggregate_history();
         let healthy = evaluate_aggregate(
-            &config,
+            &group_config(),
             &profile(),
-            &samples,
-            &[target("a", 6_150, 615), target("b", 6_150, 615)],
-            now,
-            10,
+            &baseline,
+            &targets,
+            &[target("a", 2_250, 225), target("b", 2_250, 225)],
+            HOUR_NINE,
+            9,
             60,
         )
         .expect("aggregate");
         assert_eq!(healthy.evaluations[1].outcome, EvaluationOutcome::Clear);
         assert_eq!(healthy.evaluations[2].outcome, EvaluationOutcome::Clear);
+    }
+
+    #[test]
+    fn a_run_missing_a_group_member_is_not_summed_over() {
+        // Summing whatever reported would read as traffic falling by that
+        // member's share, which no resolver actually saw.
+        let (_, mut targets) = aggregate_history();
+        let dropped = targets[targets.len() - 1].timestamp;
+        targets.retain(|sample| sample.timestamp != dropped || sample.target_id != "b");
+        let readings = combined_readings(&group_config(), &targets);
+        assert!(
+            readings
+                .iter()
+                .all(|(timestamp, _, _)| *timestamp != dropped),
+            "a run missing a declared member contributes no combined reading",
+        );
     }
 
     #[test]
@@ -2470,15 +2473,16 @@ mod tests {
 
     /// Eight days of one resolver at a steady 1.0 queries per second with a
     /// tenth blocked, sampled every 300 seconds across the 09:00 hour.
-    fn target_history(id: &str, ratio: f64) -> Vec<TargetSample> {
+    fn target_history(id: &str) -> Vec<TargetSample> {
         let mut samples = Vec::new();
         for day in 0..8i64 {
             for slot in 1..=12i64 {
+                let queries = u64::try_from((13 - slot) * 300).expect("queries");
                 samples.push(TargetSample {
                     target_id: id.to_owned(),
                     timestamp: HOUR_NINE - day * 86_400 - slot * 300,
-                    queries: u64::try_from((13 - slot) * 300).expect("queries"),
-                    blocked_ratio: ratio,
+                    queries,
+                    blocked: queries / 10,
                 });
             }
         }
@@ -2502,7 +2506,7 @@ mod tests {
             &behavioral_config(),
             &profile(),
             &target("b", 3_900, 390),
-            &target_history("b", 0.1),
+            &target_history("b"),
             HOUR_NINE,
             9,
         );
@@ -2516,12 +2520,14 @@ mod tests {
     fn one_resolver_losing_blocking_is_visible_per_target() {
         // The dilution case: on the group total a single resolver dropping to
         // zero halves the combined ratio, which is inside normal variation. Per
-        // target it is unambiguous.
+        // target it is unambiguous. The cumulative blocked counter holds still
+        // while queries keep rising, which is how a collapse reads on a
+        // monotonic counter.
         let collapsed = evaluate_target_behavior(
             &behavioral_config(),
             &profile(),
-            &target("a", 3_900, 0),
-            &target_history("a", 0.1),
+            &target("a", 3_900, 360),
+            &target_history("a"),
             HOUR_NINE,
             9,
         );
@@ -2544,7 +2550,7 @@ mod tests {
             &behavioral_config(),
             &profile(),
             &target("a", 3_900, 390),
-            &target_history("a", 0.1),
+            &target_history("a"),
             HOUR_NINE,
             9,
         );
@@ -2560,7 +2566,7 @@ mod tests {
             &behavioral_config(),
             &profile(),
             &target("a", 120, 12),
-            &target_history("a", 0.1),
+            &target_history("a"),
             HOUR_NINE,
             9,
         );

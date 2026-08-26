@@ -29,6 +29,16 @@ estimating the second would average a rate across an outage. A run without a
 window leaves the behavioural conditions not evaluated, which under ADR 0005
 neither increments, clears, nor resolves them.
 
+Windows difference **integer counts**, and the group total is the sum of its
+members rather than a stored combined ratio. Reconstructing a blocked count as
+`queries * ratio` and differencing two of those subtracts large nearly-equal
+floats to recover a small one, and the rounding error can present as a blocked
+count of zero — indistinguishable from blocking having stopped, on a condition
+that is critical and pages. Exact counts are already persisted per target, so
+nothing has to be reconstructed. A run missing a declared member is dropped
+rather than summed over what reported, which would read as a fall in traffic no
+resolver saw.
+
 Blocking collapse is a **separate condition** from blocked-ratio deviation, and
 critical rather than warning. "Blocking has stopped" is a different question from
 "the ratio moved", it is the failure an operator most needs to hear about, and a

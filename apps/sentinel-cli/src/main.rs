@@ -333,11 +333,11 @@ async fn check_with_sink(
         let baseline_samples = store
             .load_baseline_samples(cutoff_unix_seconds)
             .map_err(CommandError::state)?;
-        let aggregate_profile =
-            baseline_profile(&config, baseline).map_err(CommandError::invocation)?;
         let target_samples = store
             .load_target_samples(cutoff_unix_seconds)
             .map_err(CommandError::state)?;
+        let aggregate_profile =
+            baseline_profile(&config, baseline).map_err(CommandError::invocation)?;
         for target in &targets {
             let profile = config
                 .targets
@@ -358,6 +358,7 @@ async fn check_with_sink(
             baseline,
             aggregate_profile,
             &baseline_samples,
+            &target_samples,
             &targets,
             now_unix_seconds,
             local_hour,
@@ -1200,10 +1201,9 @@ minimum_same_hour_samples = 36
                 ),
             ]
         );
-        // 0.3.0 adds per-target behavioural conditions, so the set is no longer
-        // identical. Every pre-existing row above is unchanged, and the additions
-        // are not evaluated on a first run, which neither increments a latch nor
-        // clears or resolves one.
+        // Behavioural conditions are additive and asserted separately, so the
+        // list above stays exact. On a first run they are not evaluated, which
+        // neither increments a latch nor clears or resolves one.
         let behavioral: Vec<_> = report
             .evaluations
             .iter()
