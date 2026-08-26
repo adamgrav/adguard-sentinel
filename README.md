@@ -52,10 +52,13 @@ enabled and how stale they are, required DNS rewrites, and the global rewrite
 setting. Each field is independent. Anything you omit produces no policy
 evaluation, rather than a misleading `clear` one.
 
-**Behaviour**, across an explicitly configured group: combined query volume and
-blocked ratio compared against a learned same-hour baseline, using a median and
-scaled median absolute deviation so one busy evening does not become the new
-normal.
+**Behaviour**, across an explicitly configured group: query rate, blocked ratio,
+and blocking collapse compared against a learned same-hour baseline, using a
+median and scaled median absolute deviation so one busy evening does not become
+the new normal. Rates are measured between consecutive runs, because AdGuard
+Home resets its statistics counter every hour and a raw reading says more about
+when it was taken than about the traffic. Blocking collapse is the case a policy
+check cannot see: protection on, filters present and fresh, nothing blocked.
 
 ## Safety boundaries
 

@@ -3,6 +3,49 @@
 Notable changes to AdGuard Sentinel. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Behavioural conditions now compare a measurement window rather than a raw
+  statistics sample. AdGuard Home resets its counter on its own local hour, so a
+  sample is a partial hour total whose size depends mostly on when in the hour it
+  was taken; on a live deployment the same traffic read as 169 queries just after
+  a reset and 10,167 just before one. Both behavioural conditions were
+  consequently unable to fire at all, because a ramp sampled uniformly has a
+  maximum near twice its median and the threshold was three times it.
+- The blocked-ratio condition could not detect blocking failing. Its absolute
+  deviation floor of `0.20` was wider than the entire observed range of the
+  ratio, and the `8 * scaled_mad` term was between 1.4 and 3.3 times the median
+  in every hour, so either alone was enough to hide a collapse to zero. The
+  floor is now `0.04` and the multiple is `4`, chosen against 7.7 days of live
+  samples: no false positive in that history, and a collapse detected.
+
+### Added
+
+- `aggregate:blocking-collapsed`, a critical condition that reports blocking
+  having nearly stopped. This is the case a policy check cannot see: protection
+  enabled, every declared filter present, enabled, and fresh, and nothing being
+  blocked. See [ADR 0012](docs/decisions/0012-behavioral-conditions-measure-rates.md).
+
+### Changed
+
+- `aggregate:query-spike` (kind `combined_query_volume`) is retired and replaced
+  by `aggregate:query-rate` (kind `combined_query_rate`), measured in queries per
+  second. ADR 0010 requires `kind` to be stable for an `id` across releases, and
+  a rate is a different quantity from a count rather than a better measurement of
+  it. `aggregate:blocked-ratio` keeps its identifier and kind, because only its
+  measurement window changed. Neither retired condition had ever been active, so
+  no latch was carried.
+- `aggregate_observations.volume_limit` now holds a queries-per-second limit
+  rather than a query count, and `ratio_limit` a deviation computed with the new
+  multiple. The column and field names are unchanged, so the state schema, its
+  checksum, and the run-report schema version all stay as they are; existing
+  databases open without migration and the accumulated baseline is not discarded.
+- A run whose sample pair spans the hourly counter reset, or a gap longer than
+  600 seconds, leaves the behavioural conditions not evaluated rather than
+  guessing the elapsed traffic. About one run in eleven on a five-minute timer.
+
 ## 0.2.0 — 2026-08-20
 
 Every configuration accepted by v0.1.3 remains valid and keeps the same target
