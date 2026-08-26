@@ -5,6 +5,14 @@ Notable changes to AdGuard Sentinel. The format follows
 
 ## Unreleased
 
+The run-report `schema_version` stays `1` even though two fields are removed.
+[RELEASING.md](RELEASING.md) reserves a new report version for a removal, and
+this is a deliberate exception taken while the project is pre-1.0 and has no
+known consumers: a version bump would have to be spent again on the first real
+break, and carrying a field whose historical values mean something different is
+worse than removing it. Revisit the moment anything is observed reading the
+report.
+
 ### Fixed
 
 - Behavioural conditions now compare a measurement window rather than a raw
@@ -22,8 +30,8 @@ Notable changes to AdGuard Sentinel. The format follows
   in every hour, so either alone was enough to hide a collapse to zero. The
   floor is now `0.04` and the multiple `6`, chosen against 7.7 days of live
   samples: no false-positive latch on either resolver across the whole history.
-  Six scaled deviations is wider than a collapse to zero can produce, which is
-  deliberate — collapse is the business of `blocking-collapsed`, so the deviation
+  Where dispersion is comparable to the median, as it is there, six scaled
+  deviations exceed what a collapse to zero can produce, which is deliberate — collapse is the business of `blocking-collapsed`, so the deviation
   rule is tuned to stay quiet rather than stretched across both jobs. At four it
   produced a spurious warning about once a week on one resolver, which the group
   average had hidden.
@@ -45,6 +53,14 @@ Notable changes to AdGuard Sentinel. The format follows
   claimed the baseline was still learning, so a trained baseline whose latest
   pair spanned a counter reset was reported as learning and the documented
   `baseline_learning` reason was unreachable.
+- `aggregate.same_hour_samples` and `aggregate.baseline_ready` count windows
+  rather than raw readings, so both are narrower than the same fields on runs
+  recorded earlier: windows are the subset of readings a comparison can use, and
+  a pair spanning the hourly counter reset yields none. Expect the reported count
+  to fall by roughly the share of pairs that span a reset. `baseline_ready`
+  tracks the query-rate population, which every window belongs to; the blocked
+  ratio has its own narrower population and can still be learning when the bit
+  is set.
 - `volume_limit` and `ratio_limit` are removed from the aggregate observation
   in the run report. The limits a run applied are already reported on each
   condition, under keys naming their units, so the observation copy only
@@ -82,7 +98,8 @@ Notable changes to AdGuard Sentinel. The format follows
   rather than a query count, and `ratio_limit` a deviation computed with the new
   multiple. The state schema and its checksum are unchanged, so existing
   databases open without migration and the accumulated baseline is not
-  discarded.
+  discarded. New rows leave the legacy `volume_limit` and `ratio_limit` columns
+  null; nothing reads them.
 - A run whose sample pair spans the hourly counter reset, or a gap longer than
   600 seconds, leaves the behavioural conditions not evaluated rather than
   guessing the elapsed traffic. About one run in eleven on a five-minute timer.
@@ -190,7 +207,7 @@ live deployment. Nothing here requires a change on your side: a 0.1.0
 configuration still validates, a 0.1.0 state database is still read, and the
 state schema is unchanged at version 1.
 
-The run-report `schema_version` stays `1`. Two fields are removed and the values
+The run-report `schema_version` stays `1`. Two fields are renamed and the values
 `kind` takes have changed, which the pre-1.0 caveat in
 [RELEASING.md](RELEASING.md) now covers explicitly. Anything consuming
 `evaluations[]` or `findings[]` needs the table below.

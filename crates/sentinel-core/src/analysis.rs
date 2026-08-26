@@ -119,13 +119,6 @@ fn window_between(
 /// counts avoids reconstructing anything. A run missing a member is dropped
 /// rather than summed over what is present, which would read as a fall in
 /// traffic that never happened.
-/// Sums the declared group members per run into one combined reading, keeping
-/// only runs where every member reported, oldest first.
-///
-/// The group aggregate is the sum of its members, so summing exact per-target
-/// counts avoids reconstructing anything. A run missing a member is dropped
-/// rather than summed over what is present, which would read as a fall in
-/// traffic that never happened.
 ///
 /// Order follows the loader, which reads oldest first at full timestamp
 /// precision. Sorting on the stored second alone cannot restore the order of two
@@ -2656,6 +2649,31 @@ mod tests {
             combined_readings(&config, &samples),
             None,
             "an overflowing sum makes the group unavailable, not saturated",
+        );
+    }
+
+    #[test]
+    fn a_current_run_counter_sum_that_overflows_makes_the_aggregate_unavailable() {
+        // The historical sums and this run's sums are accumulated separately, so
+        // each needs its own guard. A wrapped total is a plausible-looking number
+        // no resolver reported.
+        let config = group_config();
+        let targets = aggregate_history();
+        let overflowing = evaluate_aggregate(
+            &config,
+            &profile(),
+            &targets,
+            &[
+                target("a", u64::MAX / 2 + 2, 0),
+                target("b", u64::MAX / 2 + 2, 0),
+            ],
+            HOUR_NINE,
+            9,
+            60,
+        );
+        assert!(
+            overflowing.is_none(),
+            "an overflowing current-run total makes the group unavailable",
         );
     }
 
