@@ -330,9 +330,6 @@ async fn check_with_sink(
             .map_err(|error| {
                 CommandError::invocation(anyhow!("invalid behavior time zone: {error}"))
             })?;
-        let baseline_samples = store
-            .load_baseline_samples(cutoff_unix_seconds)
-            .map_err(CommandError::state)?;
         let target_samples = store
             .load_target_samples(cutoff_unix_seconds)
             .map_err(CommandError::state)?;
@@ -357,7 +354,6 @@ async fn check_with_sink(
         evaluate_aggregate(
             baseline,
             aggregate_profile,
-            &baseline_samples,
             &target_samples,
             &targets,
             now_unix_seconds,
@@ -1201,9 +1197,6 @@ minimum_same_hour_samples = 36
                 ),
             ]
         );
-        // Behavioural conditions are additive and asserted separately, so the
-        // list above stays exact. On a first run they are not evaluated, which
-        // neither increments a latch nor clears or resolves one.
         let behavioral: Vec<_> = report
             .evaluations
             .iter()

@@ -11,10 +11,14 @@ a live deployment the same traffic read as 169 queries just after the reset and
 Comparing such readings against each other cannot work. A ramp sampled uniformly
 has a maximum near twice its median, so a threshold set at three times the
 median is unreachable by construction, and dispersion measured across the ramp
-inflates the deviation term that is supposed to bound it. Both behavioural
-conditions were therefore incapable of firing, and the absolute deviation floor
-compounded it: a floor wider than the entire observed range of a ratio makes a
-collapse to zero indistinguishable from health.
+inflates the deviation term that is supposed to bound it. The query-volume
+condition was therefore incapable of firing at all.
+
+The blocked-ratio condition failed differently, and the distinction matters. A
+ratio is not a ramp, so it could fire — but only on a large upward excursion,
+because an absolute deviation floor wider than the ratio's entire observed range
+makes a collapse to zero indistinguishable from health. One condition was broken
+by the metric, the other by its thresholds.
 
 Behavioural conditions consequently compare a **window**: the difference between
 two consecutive samples, divided by the elapsed time. A window means the same

@@ -149,15 +149,6 @@ impl TargetReport {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BaselineSample {
-    pub timestamp: i64,
-    pub local_hour: u8,
-    pub combined_queries: u64,
-    pub combined_blocked_ratio: f64,
-}
-
 /// One persisted per-target statistics reading.
 ///
 /// Holds the raw cumulative counters that `AdGuard Home` reported, not rates.
@@ -165,6 +156,10 @@ pub struct BaselineSample {
 /// Counts are kept as integers so that differencing is exact.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TargetSample {
+    /// Identifies the run this reading came from. Group membership is keyed on
+    /// it rather than on the timestamp, which is stored to second resolution and
+    /// so cannot distinguish two runs that land in the same second.
+    pub run_id: String,
     pub target_id: String,
     pub timestamp: i64,
     pub queries: u64,
@@ -181,8 +176,14 @@ pub struct AggregateObservation {
     pub baseline_age_seconds: i64,
     pub same_hour_samples: usize,
     pub baseline_ready: bool,
-    pub volume_limit: Option<f64>,
-    pub ratio_limit: Option<f64>,
+    /// Maximum queries per second before the query-rate condition is active.
+    /// Named for its unit: it is a rate, and the `SQLite` column it persists to is
+    /// still called `volume_limit` because renaming that would change the state
+    /// schema checksum and reject every existing database.
+    pub query_rate_limit: Option<f64>,
+    /// Maximum absolute blocked-ratio deviation before that condition is active.
+    /// Persists to the `SQLite` column `ratio_limit`, for the same reason.
+    pub blocked_ratio_limit: Option<f64>,
     pub resolver_query_share: BTreeMap<String, f64>,
     pub top_client_share: BTreeMap<String, f64>,
 }
@@ -446,12 +447,12 @@ mod tests {
     #[test]
     fn an_evaluation_persisted_by_0_1_0_still_reads() {
         let persisted = r#"{
-            "id": "target:maxwell:filter:8d676d2e2236732b",
-            "target_id": "maxwell",
+            "id": "target:resolver-a:filter:8d676d2e2236732b",
+            "target_id": "resolver-a",
             "kind": "required_filter_stale",
             "severity": "warning",
             "outcome": "clear",
-            "summary": "Maxwell has a stale required filter",
+            "summary": "Resolver A has a stale required filter",
             "expected": { "enabled": true, "maximum_age_hours": 72 },
             "observed": { "enabled": true },
             "evidence_source": "GET /control/filtering/status filters",
@@ -474,20 +475,20 @@ mod tests {
         assert_eq!(evaluation.outcome, EvaluationOutcome::Clear);
         // History is reported as it was recorded, not retrospectively corrected.
         assert_eq!(evaluation.kind, "required_filter_stale");
-        assert_eq!(evaluation.summary, "Maxwell has a stale required filter");
+        assert_eq!(evaluation.summary, "Resolver A has a stale required filter");
     }
 
     /// The new names are what a 0.1.1 report writes, so they must round-trip too.
     #[test]
     fn an_evaluation_round_trips_through_its_current_names() {
         let persisted = r#"{
-            "id": "target:maxwell:filter:8d676d2e2236732b",
-            "target_id": "maxwell",
+            "id": "target:resolver-a:filter:8d676d2e2236732b",
+            "target_id": "resolver-a",
             "kind": "required_filter",
             "reason": "matches_policy",
             "severity": "warning",
             "outcome": "clear",
-            "summary": "Maxwell required filter matches declared policy",
+            "summary": "Resolver A required filter matches declared policy",
             "expected": {},
             "observed": {},
             "evidence_source": "GET /control/filtering/status filters",

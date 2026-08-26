@@ -11,9 +11,11 @@ Notable changes to AdGuard Sentinel. The format follows
   statistics sample. AdGuard Home resets its counter on its own local hour, so a
   sample is a partial hour total whose size depends mostly on when in the hour it
   was taken; on a live deployment the same traffic read as 169 queries just after
-  a reset and 10,167 just before one. Both behavioural conditions were
-  consequently unable to fire at all, because a ramp sampled uniformly has a
-  maximum near twice its median and the threshold was three times it.
+  a reset and 10,167 just before one. The query-volume condition was
+  consequently unable to fire at all: a ramp sampled uniformly has a maximum near
+  twice its median and the threshold was three times it. The blocked-ratio
+  condition could fire, but only on a large upward excursion — its thresholds are
+  a separate defect, below.
 - The blocked-ratio condition could not detect blocking failing. Its absolute
   deviation floor of `0.20` was wider than the entire observed range of the
   ratio, and the `8 * scaled_mad` term was between 1.4 and 3.3 times the median
@@ -28,6 +30,25 @@ Notable changes to AdGuard Sentinel. The format follows
 
 ### Added
 
+- Query rate and blocked ratio now have independent baselines. Every window
+  carries a rate but only windows above the query minimum carry a comparable
+  ratio, so a sparse ratio population could suppress a fully-populated rate
+  baseline, and a large rate population could admit a critical comparison
+  against a one-point ratio history.
+- Behavioural group membership is keyed on the run rather than a
+  second-resolution timestamp, and counts distinct members, so a duplicated
+  reading cannot stand in for a member that never reported.
+- Aggregate baseline age and readiness derive from the readings the comparison
+  uses, not from previously persisted aggregate rows, which could belong to a
+  different group membership.
+- A condition that cannot be compared reports why. Previously every such case
+  claimed the baseline was still learning, so a trained baseline whose latest
+  pair spanned a counter reset was reported as learning and the documented
+  `baseline_learning` reason was unreachable.
+- `volume_limit` and `ratio_limit` in the run report are renamed
+  `query_rate_limit` and `blocked_ratio_limit`, naming their units. The SQLite
+  columns keep their names, because renaming those would change the state schema
+  checksum and reject every existing database.
 - Behavioural windows difference integer counts, and the group total is summed
   from its declared members rather than taken from a stored combined ratio.
   Reconstructing a blocked count from a ratio and differencing two of those can
@@ -225,7 +246,7 @@ The run-report `schema_version` stays `1`. Two fields are renamed and the values
   future `0.108.0` would have stopped every deployment. A different range can now
   be configured deliberately, and every run warns that it carries no evidence.
   Enforcement at the request boundary is unchanged.
-- Configuration errors name the offending value. `target "maxwell" references
+- Configuration errors name the offending value. `target "resolver-a" references
   unknown policy` is now `... unknown policy "nope"`, and the same applies to
   condition profiles, filter URLs, rewrites, behavioural baseline target ids, and
   each out-of-range condition profile count.

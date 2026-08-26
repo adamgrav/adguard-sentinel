@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use jiff::Timestamp;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sentinel_core::{
-    AggregateObservation, AlertDeliveryState, BaselineSample, ConditionEvaluation,
-    ConditionLifecycle, ConditionState, ConditionTransition, Config, DnsObservation, ExitReport,
-    FilterObservation, Finding, NotificationReport, NotificationStatus, OperationalObservation,
-    OutboxMessage, RewriteObservation, RunHealth, RunReport, TargetReport, TargetRuntimeState,
-    TargetSample, TargetStatus, TransitionKind, UpstreamObservation, advance_condition,
+    AggregateObservation, AlertDeliveryState, ConditionEvaluation, ConditionLifecycle,
+    ConditionState, ConditionTransition, Config, DnsObservation, ExitReport, FilterObservation,
+    Finding, NotificationReport, NotificationStatus, OperationalObservation, OutboxMessage,
+    RewriteObservation, RunHealth, RunReport, TargetReport, TargetRuntimeState, TargetSample,
+    TargetStatus, TransitionKind, UpstreamObservation, advance_condition,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -159,49 +159,6 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn load_baseline_samples(
-        &self,
-        cutoff_unix_seconds: i64,
-    ) -> Result<Vec<BaselineSample>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT r.completed_at, a.local_hour, a.combined_queries, a.combined_blocked_ratio
-             FROM aggregate_observations a
-             JOIN runs r ON r.id = a.run_id
-             ORDER BY r.completed_at ASC",
-        )?;
-        let rows = statement.query_map([], |row| {
-            let timestamp: String = row.get(0)?;
-            let local_hour: i64 = row.get(1)?;
-            let combined_queries: i64 = row.get(2)?;
-            let combined_blocked_ratio: f64 = row.get(3)?;
-            Ok((
-                timestamp,
-                local_hour,
-                combined_queries,
-                combined_blocked_ratio,
-            ))
-        })?;
-        let mut samples = Vec::new();
-        for row in rows {
-            let (timestamp, local_hour, combined_queries, combined_blocked_ratio) = row?;
-            let timestamp = parse_timestamp(&timestamp)?;
-            if timestamp < cutoff_unix_seconds {
-                continue;
-            }
-            samples.push(BaselineSample {
-                timestamp,
-                local_hour: u8::try_from(local_hour).map_err(|_| {
-                    StoreError::InvalidData("local hour is out of range".to_owned())
-                })?,
-                combined_queries: u64::try_from(combined_queries).map_err(|_| {
-                    StoreError::InvalidData("combined query count is negative".to_owned())
-                })?,
-                combined_blocked_ratio,
-            });
-        }
-        Ok(samples)
-    }
-
     /// Loads per-target statistics readings inside the retention window,
     /// oldest first, for deriving per-target behavioural rates.
     ///
@@ -213,7 +170,7 @@ impl StateStore {
         cutoff_unix_seconds: i64,
     ) -> Result<Vec<TargetSample>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT r.completed_at, t.target_id, t.queries, t.blocked
+            "SELECT r.completed_at, t.run_id, t.target_id, t.queries, t.blocked
              FROM target_observations t
              JOIN runs r ON r.id = t.run_id
              WHERE t.complete = 1 AND t.queries IS NOT NULL AND t.blocked IS NOT NULL
@@ -221,19 +178,21 @@ impl StateStore {
         )?;
         let rows = statement.query_map([], |row| {
             let timestamp: String = row.get(0)?;
-            let target_id: String = row.get(1)?;
-            let queries: i64 = row.get(2)?;
-            let blocked: i64 = row.get(3)?;
-            Ok((timestamp, target_id, queries, blocked))
+            let run_id: String = row.get(1)?;
+            let target_id: String = row.get(2)?;
+            let queries: i64 = row.get(3)?;
+            let blocked: i64 = row.get(4)?;
+            Ok((timestamp, run_id, target_id, queries, blocked))
         })?;
         let mut samples = Vec::new();
         for row in rows {
-            let (timestamp, target_id, queries, blocked) = row?;
+            let (timestamp, run_id, target_id, queries, blocked) = row?;
             let timestamp = parse_timestamp(&timestamp)?;
             if timestamp < cutoff_unix_seconds {
                 continue;
             }
             samples.push(TargetSample {
+                run_id,
                 target_id,
                 timestamp,
                 queries: u64::try_from(queries).map_err(|_| {
@@ -809,8 +768,8 @@ fn insert_aggregate(transaction: &Transaction<'_>, report: &RunReport) -> Result
                 aggregate.baseline_age_seconds,
                 i64_from_usize(aggregate.same_hour_samples)?,
                 bool_i64(aggregate.baseline_ready),
-                aggregate.volume_limit,
-                aggregate.ratio_limit,
+                aggregate.query_rate_limit,
+                aggregate.blocked_ratio_limit,
                 serde_json::to_string(&aggregate.resolver_query_share)
                     .map_err(|error| StoreError::InvalidData(error.to_string()))?,
                 serde_json::to_string(&aggregate.top_client_share)
@@ -1312,8 +1271,8 @@ fn load_aggregate(
             baseline_age_seconds: row.4,
             same_hour_samples: usize_from_i64(row.5, "same-hour sample count")?,
             baseline_ready: row.6 != 0,
-            volume_limit: row.7,
-            ratio_limit: row.8,
+            query_rate_limit: row.7,
+            blocked_ratio_limit: row.8,
             resolver_query_share: serde_json::from_str(&row.9)
                 .map_err(|error| StoreError::InvalidData(error.to_string()))?,
             top_client_share: serde_json::from_str(&row.10)

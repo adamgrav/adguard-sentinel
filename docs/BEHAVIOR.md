@@ -36,6 +36,14 @@ a behavior change that must be reflected here and in the run-report schema:
   fell between the samples, when more blocked than queried lands in the window,
   or when more than 600 seconds separate them, which means runs were missed. Such a run leaves every behavioural condition not evaluated,
   so it neither increments, clears, nor resolves.
+- Query rate and blocked ratio have independent baselines, each requiring the
+  configured age and count of same-local-hour windows in its own population.
+  Every window carries a rate; only windows above the query minimum carry a
+  ratio, so one can be ready while the other is not.
+- A condition that cannot be compared says which: `baseline_learning` for a
+  history too short or too sparse, `rate_window_unavailable` for a latest pair
+  spanning a reset or a gap, `window_too_small` for a window below the query
+  minimum.
 - The baseline requires the configured age and the configured count of
   same-local-hour windows. It uses median, scaled MAD `1.4826`, and a deviation
   floor of `1e-9`.
