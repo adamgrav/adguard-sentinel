@@ -12,7 +12,7 @@ use crate::config::{
 use crate::model::{
     AggregateObservation, AlertDeliveryState, BaselineSample, ConditionEvaluation,
     ConditionLifecycle, ConditionState, ConditionTransition, EvaluationOutcome,
-    OperationalObservation, Severity, TargetReport, TargetStatus, TransitionKind,
+    OperationalObservation, Severity, TargetReport, TargetSample, TargetStatus, TransitionKind,
 };
 
 #[derive(Clone, Debug)]
@@ -30,26 +30,6 @@ pub fn local_time_bucket(timestamp: Timestamp, time_zone: &str) -> Result<(u8, i
     Ok((hour, zoned.offset().seconds() / 60))
 }
 
-/// The three behavioural conditions, and the summary each carries while the
-/// baseline cannot yet be compared against.
-const BEHAVIORAL_CONDITIONS: [(&str, &str, &str); 3] = [
-    (
-        "aggregate:query-rate",
-        "combined_query_rate",
-        "Combined query-rate baseline is still learning",
-    ),
-    (
-        "aggregate:blocked-ratio",
-        "combined_blocked_ratio",
-        "Combined blocked-ratio baseline is still learning",
-    ),
-    (
-        "aggregate:blocking-collapsed",
-        "combined_blocking_collapse",
-        "Combined blocking-collapse baseline is still learning",
-    ),
-];
-
 /// Longest gap between two samples that still counts as one measurement
 /// window. The timer fires about every five minutes; a longer gap means runs
 /// were missed and the rate across it would be an average over an outage.
@@ -58,7 +38,7 @@ const RATE_WINDOW_MAXIMUM_SECONDS: f64 = 600.0;
 const RATE_WINDOW_MINIMUM_QUERIES: u64 = 100;
 const QUERY_RATE_MEDIAN_MULTIPLE: f64 = 3.0;
 const QUERY_RATE_DEVIATION_MULTIPLE: f64 = 4.0;
-const BLOCKED_RATIO_DEVIATION_MULTIPLE: f64 = 4.0;
+const BLOCKED_RATIO_DEVIATION_MULTIPLE: f64 = 6.0;
 const BLOCKED_RATIO_MINIMUM_DEVIATION: f64 = 0.04;
 const BLOCKING_COLLAPSE_FRACTION: f64 = 0.25;
 
@@ -95,23 +75,47 @@ impl RateWindow {
 /// than estimated, because guessing the reset boundary would bias the rate in
 /// a direction that depends on the resolver timezone.
 pub fn rate_window(previous: &BaselineSample, current: &BaselineSample) -> Option<RateWindow> {
-    if current.combined_queries < previous.combined_queries {
+    window_between(
+        (
+            previous.timestamp,
+            previous.combined_queries,
+            previous.combined_blocked_ratio,
+        ),
+        (
+            current.timestamp,
+            current.combined_queries,
+            current.combined_blocked_ratio,
+        ),
+        current.local_hour,
+    )
+}
+
+/// Shared window derivation for the group aggregate and for one target. Each
+/// tuple is `(timestamp, cumulative queries, cumulative blocked ratio)`.
+fn window_between(
+    previous: (i64, u64, f64),
+    current: (i64, u64, f64),
+    local_hour: u8,
+) -> Option<RateWindow> {
+    let (previous_timestamp, previous_queries, previous_ratio) = previous;
+    let (current_timestamp, current_queries, current_ratio) = current;
+    if current_queries < previous_queries {
         return None;
     }
-    let elapsed = (current.timestamp - previous.timestamp) as f64;
+    let elapsed = (current_timestamp - previous_timestamp) as f64;
     if !elapsed.is_finite() || elapsed <= 0.0 || elapsed > RATE_WINDOW_MAXIMUM_SECONDS {
         return None;
     }
-    let queries = current.combined_queries - previous.combined_queries;
-    let blocked = (current.combined_queries as f64 * current.combined_blocked_ratio)
-        - (previous.combined_queries as f64 * previous.combined_blocked_ratio);
+    let queries = current_queries - previous_queries;
+    let blocked =
+        (current_queries as f64 * current_ratio) - (previous_queries as f64 * previous_ratio);
     let blocked_ratio = if queries == 0 {
         0.0
     } else {
         (blocked / queries as f64).clamp(0.0, 1.0)
     };
     Some(RateWindow {
-        local_hour: current.local_hour,
+        local_hour,
         queries,
         elapsed_seconds: elapsed,
         query_rate: queries as f64 / elapsed,
@@ -563,6 +567,317 @@ fn evaluate_rewrites(
     }
 }
 
+/// Identifiers and phrasing for one behavioural condition set: the group
+/// aggregate, or a single target.
+struct BehavioralSubject {
+    query_rate_id: String,
+    blocked_ratio_id: String,
+    collapse_id: String,
+    query_rate_kind: &'static str,
+    blocked_ratio_kind: &'static str,
+    collapse_kind: &'static str,
+    target_id: Option<String>,
+    evidence_source: &'static str,
+    /// Sentence subject, such as `Combined AdGuard` or a resolver name.
+    noun: String,
+}
+
+impl BehavioralSubject {
+    fn aggregate() -> Self {
+        Self {
+            query_rate_id: "aggregate:query-rate".to_owned(),
+            blocked_ratio_id: "aggregate:blocked-ratio".to_owned(),
+            collapse_id: "aggregate:blocking-collapsed".to_owned(),
+            query_rate_kind: "combined_query_rate",
+            blocked_ratio_kind: "combined_blocked_ratio",
+            collapse_kind: "combined_blocking_collapse",
+            target_id: None,
+            evidence_source: "combined complete target statistics",
+            noun: "Combined AdGuard".to_owned(),
+        }
+    }
+
+    fn target(id: &str, name: &str) -> Self {
+        Self {
+            query_rate_id: format!("target:{id}:query-rate"),
+            blocked_ratio_id: format!("target:{id}:blocked-ratio"),
+            collapse_id: format!("target:{id}:blocking-collapsed"),
+            query_rate_kind: "query_rate",
+            blocked_ratio_kind: "blocked_ratio",
+            collapse_kind: "blocking_collapse",
+            target_id: Some(id.to_owned()),
+            evidence_source: "target statistics",
+            noun: name.to_owned(),
+        }
+    }
+
+    fn learning(&self) -> [(&String, &'static str, String); 3] {
+        [
+            (
+                &self.query_rate_id,
+                self.query_rate_kind,
+                format!("{} query-rate baseline is still learning", self.noun),
+            ),
+            (
+                &self.blocked_ratio_id,
+                self.blocked_ratio_kind,
+                format!("{} blocked-ratio baseline is still learning", self.noun),
+            ),
+            (
+                &self.collapse_id,
+                self.collapse_kind,
+                format!("{} blocking-collapse baseline is still learning", self.noun),
+            ),
+        ]
+    }
+}
+
+/// Emits the three behavioural conditions for one subject, and returns the
+/// query-rate and blocked-ratio limits when they could be computed.
+///
+/// A subject whose baseline is not yet old enough, that has too few same-hour
+/// windows, or whose latest pair spans a counter reset reports every condition
+/// as not evaluated, which neither increments, clears, nor resolves a latch.
+fn behavioral_evaluations(
+    subject: &BehavioralSubject,
+    profile: &ConditionProfile,
+    baseline_ready: bool,
+    history: &[RateWindow],
+    current: Option<RateWindow>,
+    minimum_windows: usize,
+) -> (Vec<ConditionEvaluation>, Option<(f64, f64)>) {
+    let rate_bounds = robust_bounds(
+        &history
+            .iter()
+            .map(|window| window.query_rate)
+            .collect::<Vec<_>>(),
+    );
+    let ratio_bounds = robust_bounds(
+        &history
+            .iter()
+            .filter_map(RateWindow::comparable_blocked_ratio)
+            .collect::<Vec<_>>(),
+    );
+    let ready = baseline_ready && history.len() >= minimum_windows;
+    let (
+        true,
+        Some(window),
+        Some((rate_median, rate_deviation)),
+        Some((ratio_median, ratio_deviation)),
+    ) = (ready, current, rate_bounds, ratio_bounds)
+    else {
+        let mut evaluations = Vec::new();
+        for (id, kind, summary) in subject.learning() {
+            evaluations.push(evaluation(
+                id.clone(),
+                subject.target_id.clone(),
+                kind,
+                Severity::Warning,
+                Verdict::not_evaluated("rate_window_unavailable", summary),
+                json!({ "minimum_same_hour_windows": minimum_windows }),
+                json!({
+                    "same_hour_windows": history.len(),
+                    "window_available": current.is_some(),
+                    "baseline_ready": baseline_ready,
+                }),
+                subject.evidence_source,
+                false,
+                profile.behavioral_anomaly_sustain_runs,
+                profile.recovery_runs,
+            ));
+        }
+        return (evaluations, None);
+    };
+
+    let rate_limit = (rate_median * QUERY_RATE_MEDIAN_MULTIPLE)
+        .max(rate_median + QUERY_RATE_DEVIATION_MULTIPLE * rate_deviation);
+    let ratio_limit =
+        BLOCKED_RATIO_MINIMUM_DEVIATION.max(BLOCKED_RATIO_DEVIATION_MULTIPLE * ratio_deviation);
+    let collapse_limit = ratio_median * BLOCKING_COLLAPSE_FRACTION;
+    let comparable = window.comparable_blocked_ratio();
+    let too_small = || {
+        Verdict::not_evaluated(
+            "window_too_small",
+            format!("{} has too few queries to compare", subject.noun),
+        )
+    };
+
+    let evaluations = vec![
+        evaluation(
+            subject.query_rate_id.clone(),
+            subject.target_id.clone(),
+            subject.query_rate_kind,
+            Severity::Warning,
+            Verdict::from_flag(
+                window.query_rate > rate_limit,
+                (
+                    "above_baseline",
+                    format!("{} query rate is anomalously high", subject.noun),
+                ),
+                (
+                    "within_baseline",
+                    format!("{} query rate is within baseline", subject.noun),
+                ),
+            ),
+            json!({
+                "maximum_queries_per_second": rate_limit,
+                "same_hour_median_queries_per_second": rate_median,
+                "same_hour_windows": history.len(),
+            }),
+            json!({
+                "queries_per_second": window.query_rate,
+                "window_queries": window.queries,
+                "window_seconds": window.elapsed_seconds,
+            }),
+            subject.evidence_source,
+            true,
+            profile.behavioral_anomaly_sustain_runs,
+            profile.recovery_runs,
+        ),
+        evaluation(
+            subject.blocked_ratio_id.clone(),
+            subject.target_id.clone(),
+            subject.blocked_ratio_kind,
+            Severity::Warning,
+            match comparable {
+                Some(ratio) => Verdict::from_flag(
+                    (ratio - ratio_median).abs() > ratio_limit,
+                    (
+                        "outside_baseline",
+                        format!("{} blocked-query ratio is anomalous", subject.noun),
+                    ),
+                    (
+                        "within_baseline",
+                        format!("{} blocked-query ratio is within baseline", subject.noun),
+                    ),
+                ),
+                None => too_small(),
+            },
+            json!({
+                "maximum_absolute_deviation": ratio_limit,
+                "same_hour_median": ratio_median,
+                "minimum_queries": RATE_WINDOW_MINIMUM_QUERIES,
+            }),
+            json!({
+                "window_blocked_ratio": comparable,
+                "window_queries": window.queries,
+            }),
+            subject.evidence_source,
+            comparable.is_some(),
+            profile.behavioral_anomaly_sustain_runs,
+            profile.recovery_runs,
+        ),
+        evaluation(
+            subject.collapse_id.clone(),
+            subject.target_id.clone(),
+            subject.collapse_kind,
+            Severity::Critical,
+            match comparable {
+                Some(ratio) => Verdict::from_flag(
+                    ratio < collapse_limit,
+                    (
+                        "blocking_collapsed",
+                        format!("{} blocking has nearly stopped", subject.noun),
+                    ),
+                    (
+                        "blocking_sustained",
+                        format!("{} blocking is sustained", subject.noun),
+                    ),
+                ),
+                None => too_small(),
+            },
+            json!({
+                "minimum_blocked_ratio": collapse_limit,
+                "same_hour_median": ratio_median,
+                "minimum_queries": RATE_WINDOW_MINIMUM_QUERIES,
+            }),
+            json!({
+                "window_blocked_ratio": comparable,
+                "window_queries": window.queries,
+            }),
+            subject.evidence_source,
+            comparable.is_some(),
+            profile.behavioral_anomaly_sustain_runs,
+            profile.recovery_runs,
+        ),
+    ];
+    (evaluations, Some((rate_limit, ratio_limit)))
+}
+
+/// Behavioural conditions for one target, so that a single resolver losing
+/// blocking is not diluted by the other members of its group.
+///
+/// Returns nothing when the target is absent from the declared behavioural
+/// group or its current observation is incomplete: an incomplete reading has no
+/// counter to difference against, and under ADR 0011 a condition that stops
+/// being produced retains its latch rather than resolving.
+pub fn evaluate_target_behavior(
+    config: &BehavioralBaselineConfig,
+    profile: &ConditionProfile,
+    report: &TargetReport,
+    samples: &[TargetSample],
+    now_unix_seconds: i64,
+    local_hour: u8,
+) -> Vec<ConditionEvaluation> {
+    if !config.target_ids.iter().any(|id| id == &report.id) {
+        return Vec::new();
+    }
+    let Some(operational) = report.operational.as_ref() else {
+        return Vec::new();
+    };
+    if !report.complete {
+        return Vec::new();
+    }
+    let mine: Vec<&TargetSample> = samples
+        .iter()
+        .filter(|sample| sample.target_id == report.id)
+        .collect();
+    let hour_of = |timestamp: i64| {
+        Timestamp::from_second(timestamp)
+            .ok()
+            .and_then(|value| local_time_bucket(value, &config.time_zone).ok())
+            .map(|(hour, _)| hour)
+    };
+    let history: Vec<RateWindow> = mine
+        .windows(2)
+        .filter_map(|pair| {
+            let hour = hour_of(pair[1].timestamp)?;
+            if hour != local_hour {
+                return None;
+            }
+            window_between(
+                (pair[0].timestamp, pair[0].queries, pair[0].blocked_ratio),
+                (pair[1].timestamp, pair[1].queries, pair[1].blocked_ratio),
+                hour,
+            )
+        })
+        .collect();
+    let current = mine.last().and_then(|previous| {
+        window_between(
+            (previous.timestamp, previous.queries, previous.blocked_ratio),
+            (
+                now_unix_seconds,
+                operational.queries,
+                operational.blocked_ratio,
+            ),
+            local_hour,
+        )
+    });
+    let baseline_ready = mine.first().is_some_and(|oldest| {
+        now_unix_seconds.saturating_sub(oldest.timestamp)
+            >= i64::from(config.learning_days) * 86_400
+    });
+    let (evaluations, _) = behavioral_evaluations(
+        &BehavioralSubject::target(&report.id, &report.name),
+        profile,
+        baseline_ready,
+        &history,
+        current,
+        config.minimum_same_hour_samples,
+    );
+    evaluations
+}
+
 pub fn evaluate_aggregate(
     config: &BehavioralBaselineConfig,
     profile: &ConditionProfile,
@@ -638,201 +953,31 @@ pub fn evaluate_aggregate(
         resolver_query_share,
         top_client_share,
     };
-    let mut evaluations = Vec::new();
-    if baseline_ready {
-        let current_sample = BaselineSample {
-            timestamp: now_unix_seconds,
-            local_hour,
-            combined_queries,
-            combined_blocked_ratio,
-        };
-        let history: Vec<RateWindow> = retained_samples
-            .windows(2)
-            .filter_map(|pair| rate_window(&pair[0], &pair[1]))
-            .filter(|window| window.local_hour == local_hour)
-            .collect();
-        let current = retained_samples
-            .last()
-            .and_then(|previous| rate_window(previous, &current_sample));
-        let rate_bounds = robust_bounds(
-            &history
-                .iter()
-                .map(|window| window.query_rate)
-                .collect::<Vec<_>>(),
-        );
-        let ratio_bounds = robust_bounds(
-            &history
-                .iter()
-                .filter_map(RateWindow::comparable_blocked_ratio)
-                .collect::<Vec<_>>(),
-        );
-        let ready = history.len() >= config.minimum_same_hour_samples;
-        match (ready, current, rate_bounds, ratio_bounds) {
-            (
-                true,
-                Some(window),
-                Some((rate_median, rate_deviation)),
-                Some((ratio_median, ratio_deviation)),
-            ) => {
-                let rate_limit = (rate_median * QUERY_RATE_MEDIAN_MULTIPLE)
-                    .max(rate_median + QUERY_RATE_DEVIATION_MULTIPLE * rate_deviation);
-                let ratio_limit = BLOCKED_RATIO_MINIMUM_DEVIATION
-                    .max(BLOCKED_RATIO_DEVIATION_MULTIPLE * ratio_deviation);
-                let collapse_limit = ratio_median * BLOCKING_COLLAPSE_FRACTION;
-                observation.volume_limit = Some(rate_limit);
-                observation.ratio_limit = Some(ratio_limit);
-                evaluations.push(evaluation(
-                    "aggregate:query-rate".to_owned(),
-                    None,
-                    "combined_query_rate",
-                    Severity::Warning,
-                    Verdict::from_flag(
-                        window.query_rate > rate_limit,
-                        (
-                            "above_baseline",
-                            "Combined AdGuard query rate is anomalously high".to_owned(),
-                        ),
-                        (
-                            "within_baseline",
-                            "Combined AdGuard query rate is within baseline".to_owned(),
-                        ),
-                    ),
-                    json!({
-                        "maximum_queries_per_second": rate_limit,
-                        "same_hour_median_queries_per_second": rate_median,
-                        "same_hour_windows": history.len(),
-                    }),
-                    json!({
-                        "queries_per_second": window.query_rate,
-                        "window_queries": window.queries,
-                        "window_seconds": window.elapsed_seconds,
-                    }),
-                    "combined complete target statistics",
-                    true,
-                    profile.behavioral_anomaly_sustain_runs,
-                    profile.recovery_runs,
-                ));
-                let comparable = window.comparable_blocked_ratio();
-                evaluations.push(evaluation(
-                    "aggregate:blocked-ratio".to_owned(),
-                    None,
-                    "combined_blocked_ratio",
-                    Severity::Warning,
-                    match comparable {
-                        Some(ratio) => Verdict::from_flag(
-                            (ratio - ratio_median).abs() > ratio_limit,
-                            (
-                                "outside_baseline",
-                                "Combined AdGuard blocked-query ratio is anomalous".to_owned(),
-                            ),
-                            (
-                                "within_baseline",
-                                "Combined AdGuard blocked-query ratio is within baseline"
-                                    .to_owned(),
-                            ),
-                        ),
-                        None => Verdict::not_evaluated(
-                            "window_too_small",
-                            "Combined blocked-query ratio has too few queries to compare"
-                                .to_owned(),
-                        ),
-                    },
-                    json!({
-                        "maximum_absolute_deviation": ratio_limit,
-                        "same_hour_median": ratio_median,
-                        "minimum_queries": RATE_WINDOW_MINIMUM_QUERIES,
-                    }),
-                    json!({
-                        "window_blocked_ratio": comparable,
-                        "window_queries": window.queries,
-                    }),
-                    "combined complete target statistics",
-                    comparable.is_some(),
-                    profile.behavioral_anomaly_sustain_runs,
-                    profile.recovery_runs,
-                ));
-                evaluations.push(evaluation(
-                    "aggregate:blocking-collapsed".to_owned(),
-                    None,
-                    "combined_blocking_collapse",
-                    Severity::Critical,
-                    match comparable {
-                        Some(ratio) => Verdict::from_flag(
-                            ratio < collapse_limit,
-                            (
-                                "blocking_collapsed",
-                                "Combined AdGuard blocking has nearly stopped".to_owned(),
-                            ),
-                            (
-                                "blocking_sustained",
-                                "Combined AdGuard blocking is sustained".to_owned(),
-                            ),
-                        ),
-                        None => Verdict::not_evaluated(
-                            "window_too_small",
-                            "Combined blocking has too few queries to compare".to_owned(),
-                        ),
-                    },
-                    json!({
-                        "minimum_blocked_ratio": collapse_limit,
-                        "same_hour_median": ratio_median,
-                        "minimum_queries": RATE_WINDOW_MINIMUM_QUERIES,
-                    }),
-                    json!({
-                        "window_blocked_ratio": comparable,
-                        "window_queries": window.queries,
-                    }),
-                    "combined complete target statistics",
-                    comparable.is_some(),
-                    profile.behavioral_anomaly_sustain_runs,
-                    profile.recovery_runs,
-                ));
-            }
-            _ => {
-                for (id, kind, summary) in BEHAVIORAL_CONDITIONS {
-                    evaluations.push(evaluation(
-                        id.to_owned(),
-                        None,
-                        kind,
-                        Severity::Warning,
-                        Verdict::not_evaluated("rate_window_unavailable", summary.to_owned()),
-                        json!({
-                            "minimum_same_hour_windows": config.minimum_same_hour_samples,
-                        }),
-                        json!({
-                            "same_hour_windows": history.len(),
-                            "window_available": current.is_some(),
-                        }),
-                        "retained aggregate samples",
-                        false,
-                        profile.behavioral_anomaly_sustain_runs,
-                        profile.recovery_runs,
-                    ));
-                }
-            }
-        }
-    } else {
-        for (id, kind, summary) in BEHAVIORAL_CONDITIONS {
-            evaluations.push(evaluation(
-                id.to_owned(),
-                None,
-                kind,
-                Severity::Warning,
-                Verdict::not_evaluated("baseline_learning", summary.to_owned()),
-                json!({
-                    "learning_days": config.learning_days,
-                    "minimum_same_hour_samples": config.minimum_same_hour_samples,
-                }),
-                json!({
-                    "baseline_age_seconds": baseline_age_seconds,
-                    "same_hour_samples": same_hour.len(),
-                }),
-                "retained aggregate samples",
-                false,
-                profile.behavioral_anomaly_sustain_runs,
-                profile.recovery_runs,
-            ));
-        }
+    let current_sample = BaselineSample {
+        timestamp: now_unix_seconds,
+        local_hour,
+        combined_queries,
+        combined_blocked_ratio,
+    };
+    let history: Vec<RateWindow> = retained_samples
+        .windows(2)
+        .filter_map(|pair| rate_window(&pair[0], &pair[1]))
+        .filter(|window| window.local_hour == local_hour)
+        .collect();
+    let current = retained_samples
+        .last()
+        .and_then(|previous| rate_window(previous, &current_sample));
+    let (evaluations, limits) = behavioral_evaluations(
+        &BehavioralSubject::aggregate(),
+        profile,
+        baseline_ready,
+        &history,
+        current,
+        config.minimum_same_hour_samples,
+    );
+    if let Some((rate_limit, ratio_limit)) = limits {
+        observation.volume_limit = Some(rate_limit);
+        observation.ratio_limit = Some(ratio_limit);
     }
     Some(AggregateEvaluation {
         observation,
@@ -1094,7 +1239,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        advance_condition, evaluate_aggregate, local_time_bucket, rate_window, robust_bounds,
+        advance_condition, evaluate_aggregate, evaluate_target_behavior, local_time_bucket,
+        rate_window, robust_bounds,
     };
     use crate::config::{
         BehavioralBaselineConfig, ConditionProfile, PolicyConfig, RequiredFilter, RequiredRewrite,
@@ -1103,8 +1249,8 @@ mod tests {
     use crate::model::{
         AlertDeliveryState, BaselineSample, ConditionEvaluation, ConditionLifecycle,
         ConditionState, DnsObservation, EvaluationOutcome, FilterObservation,
-        OperationalObservation, RewriteObservation, Severity, TargetReport, TargetStatus,
-        TransitionKind,
+        OperationalObservation, RewriteObservation, Severity, TargetReport, TargetSample,
+        TargetStatus, TransitionKind,
     };
 
     /// Condition identifiers embed this hash and latch state is keyed on the
@@ -2316,6 +2462,114 @@ mod tests {
             error_kind: None,
             error_detail: None,
         }
+    }
+
+    /// 09:59 Amsterdam, so a sample and the 55 minutes before it share one
+    /// local hour and land in the same baseline bucket.
+    const HOUR_NINE: i64 = 1_800_003_540;
+
+    /// Eight days of one resolver at a steady 1.0 queries per second with a
+    /// tenth blocked, sampled every 300 seconds across the 09:00 hour.
+    fn target_history(id: &str, ratio: f64) -> Vec<TargetSample> {
+        let mut samples = Vec::new();
+        for day in 0..8i64 {
+            for slot in 1..=12i64 {
+                samples.push(TargetSample {
+                    target_id: id.to_owned(),
+                    timestamp: HOUR_NINE - day * 86_400 - slot * 300,
+                    queries: u64::try_from((13 - slot) * 300).expect("queries"),
+                    blocked_ratio: ratio,
+                });
+            }
+        }
+        samples.sort_by_key(|sample| sample.timestamp);
+        samples
+    }
+
+    fn behavioral_config() -> BehavioralBaselineConfig {
+        BehavioralBaselineConfig {
+            target_ids: vec!["a".to_owned()],
+            time_zone: "Europe/Amsterdam".to_owned(),
+            learning_days: 7,
+            minimum_same_hour_samples: 36,
+        }
+    }
+
+    #[test]
+    fn a_target_outside_the_behavioral_group_gets_no_conditions() {
+        // ADR 0011: nothing declared, nothing evaluated.
+        let evaluations = evaluate_target_behavior(
+            &behavioral_config(),
+            &profile(),
+            &target("b", 3_900, 390),
+            &target_history("b", 0.1),
+            HOUR_NINE,
+            9,
+        );
+        assert!(
+            evaluations.is_empty(),
+            "target b is not named in target_ids",
+        );
+    }
+
+    #[test]
+    fn one_resolver_losing_blocking_is_visible_per_target() {
+        // The dilution case: on the group total a single resolver dropping to
+        // zero halves the combined ratio, which is inside normal variation. Per
+        // target it is unambiguous.
+        let collapsed = evaluate_target_behavior(
+            &behavioral_config(),
+            &profile(),
+            &target("a", 3_900, 0),
+            &target_history("a", 0.1),
+            HOUR_NINE,
+            9,
+        );
+        let ids: Vec<_> = collapsed.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "target:a:query-rate",
+                "target:a:blocked-ratio",
+                "target:a:blocking-collapsed",
+            ],
+        );
+        assert_eq!(collapsed[0].outcome, EvaluationOutcome::Clear);
+        assert_eq!(collapsed[1].outcome, EvaluationOutcome::Active);
+        assert_eq!(collapsed[2].outcome, EvaluationOutcome::Active);
+        assert_eq!(collapsed[2].severity, Severity::Critical);
+        assert_eq!(collapsed[2].target_id.as_deref(), Some("a"));
+
+        let healthy = evaluate_target_behavior(
+            &behavioral_config(),
+            &profile(),
+            &target("a", 3_900, 390),
+            &target_history("a", 0.1),
+            HOUR_NINE,
+            9,
+        );
+        assert_eq!(healthy[1].outcome, EvaluationOutcome::Clear);
+        assert_eq!(healthy[2].outcome, EvaluationOutcome::Clear);
+    }
+
+    #[test]
+    fn a_target_whose_latest_pair_spans_a_reset_is_not_evaluated() {
+        // The current reading is below the previous one, so AdGuard reset its
+        // counter between them and the elapsed traffic is unknowable.
+        let evaluations = evaluate_target_behavior(
+            &behavioral_config(),
+            &profile(),
+            &target("a", 120, 12),
+            &target_history("a", 0.1),
+            HOUR_NINE,
+            9,
+        );
+        assert!(
+            evaluations
+                .iter()
+                .all(|item| item.outcome == EvaluationOutcome::NotEvaluated),
+            "a reset must not increment, clear, or resolve a latch",
+        );
     }
 
     fn profile() -> ConditionProfile {

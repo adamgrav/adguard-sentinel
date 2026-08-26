@@ -74,6 +74,9 @@ Every kind, and the reasons it can report:
 | `combined_query_rate` | `within_baseline`, `above_baseline`, `baseline_learning`, `rate_window_unavailable` |
 | `combined_blocked_ratio` | `within_baseline`, `outside_baseline`, `baseline_learning`, `rate_window_unavailable`, `window_too_small` |
 | `combined_blocking_collapse` | `blocking_sustained`, `blocking_collapsed`, `baseline_learning`, `rate_window_unavailable`, `window_too_small` |
+| `query_rate` | `within_baseline`, `above_baseline`, `rate_window_unavailable` |
+| `blocked_ratio` | `within_baseline`, `outside_baseline`, `rate_window_unavailable`, `window_too_small` |
+| `blocking_collapse` | `blocking_sustained`, `blocking_collapsed`, `rate_window_unavailable`, `window_too_small` |
 
 `severity` is the one field that deliberately varies for a given `id`: an
 unreachable resolver is a warning and a rejected credential is critical, because

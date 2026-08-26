@@ -18,11 +18,22 @@ Notable changes to AdGuard Sentinel. The format follows
   deviation floor of `0.20` was wider than the entire observed range of the
   ratio, and the `8 * scaled_mad` term was between 1.4 and 3.3 times the median
   in every hour, so either alone was enough to hide a collapse to zero. The
-  floor is now `0.04` and the multiple is `4`, chosen against 7.7 days of live
-  samples: no false positive in that history, and a collapse detected.
+  floor is now `0.04` and the multiple `6`, chosen against 7.7 days of live
+  samples: no false-positive latch on either resolver across the whole history.
+  Six scaled deviations is wider than a collapse to zero can produce, which is
+  deliberate — collapse is the business of `blocking-collapsed`, so the deviation
+  rule is tuned to stay quiet rather than stretched across both jobs. At four it
+  produced a spurious warning about once a week on one resolver, which the group
+  average had hidden.
 
 ### Added
 
+- Per-target behavioural conditions `target:<id>:query-rate`,
+  `target:<id>:blocked-ratio`, and `target:<id>:blocking-collapsed`, for targets
+  named in `[behavioral_baseline].target_ids`. A group total dilutes a single
+  resolver: one of two losing blocking entirely moves the combined ratio by half
+  of what it moved on that resolver. Configurations without `[behavioral_baseline]`,
+  and targets not named in it, gain no conditions.
 - `aggregate:blocking-collapsed`, a critical condition that reports blocking
   having nearly stopped. This is the case a policy check cannot see: protection
   enabled, every declared filter present, enabled, and fresh, and nothing being

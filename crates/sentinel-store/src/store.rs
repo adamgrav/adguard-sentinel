@@ -9,7 +9,7 @@ use sentinel_core::{
     ConditionLifecycle, ConditionState, ConditionTransition, Config, DnsObservation, ExitReport,
     FilterObservation, Finding, NotificationReport, NotificationStatus, OperationalObservation,
     OutboxMessage, RewriteObservation, RunHealth, RunReport, TargetReport, TargetRuntimeState,
-    TargetStatus, TransitionKind, UpstreamObservation, advance_condition,
+    TargetSample, TargetStatus, TransitionKind, UpstreamObservation, advance_condition,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -197,6 +197,49 @@ impl StateStore {
                     StoreError::InvalidData("combined query count is negative".to_owned())
                 })?,
                 combined_blocked_ratio,
+            });
+        }
+        Ok(samples)
+    }
+
+    /// Loads per-target statistics readings inside the retention window,
+    /// oldest first, for deriving per-target behavioural rates.
+    ///
+    /// Only complete observations are returned: an incomplete one has no
+    /// counter to difference against, and treating a missing reading as a
+    /// value would invent traffic that was never observed.
+    pub fn load_target_samples(
+        &self,
+        cutoff_unix_seconds: i64,
+    ) -> Result<Vec<TargetSample>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT r.completed_at, t.target_id, t.queries, t.blocked_ratio
+             FROM target_observations t
+             JOIN runs r ON r.id = t.run_id
+             WHERE t.complete = 1 AND t.queries IS NOT NULL AND t.blocked_ratio IS NOT NULL
+             ORDER BY r.completed_at ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let timestamp: String = row.get(0)?;
+            let target_id: String = row.get(1)?;
+            let queries: i64 = row.get(2)?;
+            let blocked_ratio: f64 = row.get(3)?;
+            Ok((timestamp, target_id, queries, blocked_ratio))
+        })?;
+        let mut samples = Vec::new();
+        for row in rows {
+            let (timestamp, target_id, queries, blocked_ratio) = row?;
+            let timestamp = parse_timestamp(&timestamp)?;
+            if timestamp < cutoff_unix_seconds {
+                continue;
+            }
+            samples.push(TargetSample {
+                target_id,
+                timestamp,
+                queries: u64::try_from(queries).map_err(|_| {
+                    StoreError::InvalidData("target query count is negative".to_owned())
+                })?,
+                blocked_ratio,
             });
         }
         Ok(samples)

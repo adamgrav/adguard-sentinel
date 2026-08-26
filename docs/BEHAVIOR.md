@@ -37,7 +37,9 @@ a behavior change that must be reflected here and in the run-report schema:
 - Query rate is active above `max(3 * median, median + 4 * scaled_mad)`,
   measured in queries per second.
 - Blocked ratio requires at least 100 queries in the window and an absolute
-  deviation above `max(0.04, 4 * scaled_mad)`.
+  deviation above `max(0.04, 6 * scaled_mad)`. The multiple is wide on purpose:
+  a collapse to zero is the business of the blocking-collapse condition below,
+  so this one is tuned to stay quiet rather than stretched to cover both.
 - Blocking collapse requires at least 100 queries in the window and is active
   below `0.25 * median`. It is critical rather than warning, and it is the only
   condition that reports blocking having stopped while every declared policy

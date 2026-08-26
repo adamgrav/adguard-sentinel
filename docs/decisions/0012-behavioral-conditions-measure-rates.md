@@ -37,6 +37,22 @@ only condition that reports blocking having failed while protection is enabled
 and every declared filter is present, enabled, and fresh — the case where policy
 checking is satisfied and blocking is not happening.
 
+Behaviour is evaluated **per target as well as across the group**, under
+`target:<id>:query-rate`, `target:<id>:blocked-ratio`, and
+`target:<id>:blocking-collapsed`, for targets named in
+`[behavioral_baseline].target_ids`. A group total dilutes a single resolver: one
+of two losing blocking entirely moves the combined ratio by half of what it
+moved on that resolver, which is inside normal variation. Live data showed the
+dilution working in the other direction too — a per-target false positive that
+the group average had hidden.
+
+The blocked-ratio deviation rule is deliberately wide, at six scaled deviations,
+which is more than a collapse to zero can produce. That is not an oversight. It
+is what separating collapse into its own condition buys: the deviation rule no
+longer has to cover a failure another condition detects properly, so it can be
+tuned to stay quiet. Held as one symmetric test, the same data forced a choice
+between a weekly false alarm and missing the failure that matters.
+
 `aggregate:query-spike` is retired rather than repurposed. Its `kind`,
 `combined_query_volume`, named a count, and ADR 0010 requires `kind` to be stable
 for a given `id` across releases; a rate is a different quantity, not a better

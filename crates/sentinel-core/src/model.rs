@@ -158,6 +158,19 @@ pub struct BaselineSample {
     pub combined_blocked_ratio: f64,
 }
 
+/// One persisted per-target statistics reading.
+///
+/// Like `BaselineSample` this holds the raw cumulative counter that `AdGuard`
+/// Home reported, not a rate. Rates are derived on read by differencing
+/// consecutive readings; see ADR 0012.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetSample {
+    pub target_id: String,
+    pub timestamp: i64,
+    pub queries: u64,
+    pub blocked_ratio: f64,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateObservation {
