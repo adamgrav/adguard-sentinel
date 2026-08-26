@@ -60,8 +60,11 @@ moved on that resolver, which is inside normal variation. Live data showed the
 dilution working in the other direction too — a per-target false positive that
 the group average had hidden.
 
-The blocked-ratio deviation rule is deliberately wide, at six scaled deviations,
-which is more than a collapse to zero can produce. That is not an oversight. It
+The blocked-ratio deviation rule is deliberately wide, at six scaled deviations.
+On a deployment whose dispersion is comparable to its median, as the one this was
+calibrated against is, that is more than a collapse to zero can produce; where
+dispersion is much smaller the absolute floor binds instead and the rule does
+see a collapse. Neither case is relied upon. That is not an oversight. It
 is what separating collapse into its own condition buys: the deviation rule no
 longer has to cover a failure another condition detects properly, so it can be
 tuned to stay quiet. Held as one symmetric test, the same data forced a choice

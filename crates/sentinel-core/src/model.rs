@@ -176,14 +176,6 @@ pub struct AggregateObservation {
     pub baseline_age_seconds: i64,
     pub same_hour_samples: usize,
     pub baseline_ready: bool,
-    /// Maximum queries per second before the query-rate condition is active.
-    /// Named for its unit: it is a rate, and the `SQLite` column it persists to is
-    /// still called `volume_limit` because renaming that would change the state
-    /// schema checksum and reject every existing database.
-    pub query_rate_limit: Option<f64>,
-    /// Maximum absolute blocked-ratio deviation before that condition is active.
-    /// Persists to the `SQLite` column `ratio_limit`, for the same reason.
-    pub blocked_ratio_limit: Option<f64>,
     pub resolver_query_share: BTreeMap<String, f64>,
     pub top_client_share: BTreeMap<String, f64>,
 }

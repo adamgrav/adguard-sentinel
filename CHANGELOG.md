@@ -45,10 +45,14 @@ Notable changes to AdGuard Sentinel. The format follows
   claimed the baseline was still learning, so a trained baseline whose latest
   pair spanned a counter reset was reported as learning and the documented
   `baseline_learning` reason was unreachable.
-- `volume_limit` and `ratio_limit` in the run report are renamed
-  `query_rate_limit` and `blocked_ratio_limit`, naming their units. The SQLite
-  columns keep their names, because renaming those would change the state schema
-  checksum and reject every existing database.
+- `volume_limit` and `ratio_limit` are removed from the aggregate observation
+  in the run report. The limits a run applied are already reported on each
+  condition, under keys naming their units, so the observation copy only
+  duplicated them. It could not be renamed in place: rows written before this
+  release hold a query count in `volume_limit`, and reading those as a rate would
+  relabel history. The SQLite columns stay, unread and unwritten, because
+  dropping them would change the state schema checksum and reject every existing
+  database.
 - Behavioural windows difference integer counts, and the group total is summed
   from its declared members rather than taken from a stored combined ratio.
   Reconstructing a blocked count from a ratio and differencing two of those can
@@ -76,9 +80,9 @@ Notable changes to AdGuard Sentinel. The format follows
   no latch was carried.
 - `aggregate_observations.volume_limit` now holds a queries-per-second limit
   rather than a query count, and `ratio_limit` a deviation computed with the new
-  multiple. The column and field names are unchanged, so the state schema, its
-  checksum, and the run-report schema version all stay as they are; existing
-  databases open without migration and the accumulated baseline is not discarded.
+  multiple. The state schema and its checksum are unchanged, so existing
+  databases open without migration and the accumulated baseline is not
+  discarded.
 - A run whose sample pair spans the hourly counter reset, or a gap longer than
   600 seconds, leaves the behavioural conditions not evaluated rather than
   guessing the elapsed traffic. About one run in eleven on a five-minute timer.
@@ -186,7 +190,7 @@ live deployment. Nothing here requires a change on your side: a 0.1.0
 configuration still validates, a 0.1.0 state database is still read, and the
 state schema is unchanged at version 1.
 
-The run-report `schema_version` stays `1`. Two fields are renamed and the values
+The run-report `schema_version` stays `1`. Two fields are removed and the values
 `kind` takes have changed, which the pre-1.0 caveat in
 [RELEASING.md](RELEASING.md) now covers explicitly. Anything consuming
 `evaluations[]` or `findings[]` needs the table below.

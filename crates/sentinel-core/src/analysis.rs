@@ -119,35 +119,52 @@ fn window_between(
 /// counts avoids reconstructing anything. A run missing a member is dropped
 /// rather than summed over what is present, which would read as a fall in
 /// traffic that never happened.
+/// Sums the declared group members per run into one combined reading, keeping
+/// only runs where every member reported, oldest first.
+///
+/// The group aggregate is the sum of its members, so summing exact per-target
+/// counts avoids reconstructing anything. A run missing a member is dropped
+/// rather than summed over what is present, which would read as a fall in
+/// traffic that never happened.
+///
+/// Order follows the loader, which reads oldest first at full timestamp
+/// precision. Sorting on the stored second alone cannot restore the order of two
+/// runs that completed within the same second, and differencing them the wrong
+/// way round would overcount the traffic between them.
+///
+/// A counter sum that overflows makes the whole aggregate unavailable. Saturating
+/// would flatten two genuinely different readings into one value and derive a
+/// window of no traffic, which ADR 0003 forbids: invalid external data must not
+/// become a plausible one.
 fn combined_readings(
     config: &BehavioralBaselineConfig,
     samples: &[TargetSample],
-) -> Vec<(i64, u64, u64)> {
+) -> Option<Vec<(i64, u64, u64)>> {
+    let mut order: Vec<&str> = Vec::new();
     let mut per_run: BTreeMap<&str, (BTreeSet<&str>, i64, u64, u64)> = BTreeMap::new();
     for sample in samples {
         if !config.target_ids.iter().any(|id| id == &sample.target_id) {
             continue;
         }
-        let entry = per_run.entry(sample.run_id.as_str()).or_insert((
-            BTreeSet::new(),
-            sample.timestamp,
-            0,
-            0,
-        ));
+        let entry = per_run.entry(sample.run_id.as_str()).or_insert_with(|| {
+            order.push(sample.run_id.as_str());
+            (BTreeSet::new(), sample.timestamp, 0, 0)
+        });
         // Count distinct members, so a duplicated reading cannot stand in for a
         // member that never reported.
         if entry.0.insert(sample.target_id.as_str()) {
-            entry.2 = entry.2.saturating_add(sample.queries);
-            entry.3 = entry.3.saturating_add(sample.blocked);
+            entry.2 = entry.2.checked_add(sample.queries)?;
+            entry.3 = entry.3.checked_add(sample.blocked)?;
         }
     }
-    let mut readings: Vec<(i64, u64, u64)> = per_run
-        .into_values()
-        .filter(|(members, _, _, _)| members.len() == config.target_ids.len())
-        .map(|(_, timestamp, queries, blocked)| (timestamp, queries, blocked))
-        .collect();
-    readings.sort_by_key(|(timestamp, _, _)| *timestamp);
-    readings
+    Some(
+        order
+            .into_iter()
+            .filter_map(|run| per_run.get(run))
+            .filter(|(members, _, _, _)| members.len() == config.target_ids.len())
+            .map(|(_, timestamp, queries, blocked)| (*timestamp, *queries, *blocked))
+            .collect(),
+    )
 }
 
 /// The local hour a timestamp falls in, or `None` if it cannot be resolved.
@@ -647,13 +664,6 @@ impl BehavioralSubject {
     }
 }
 
-/// Limits a behavioural comparison produced, for the aggregate observation.
-#[derive(Clone, Copy, Debug, Default)]
-struct BehavioralLimits {
-    query_rate: Option<f64>,
-    blocked_ratio: Option<f64>,
-}
-
 /// Emits the three behavioural conditions for one subject.
 ///
 /// Query rate and blocked ratio have **independent** baselines. Every window
@@ -676,7 +686,7 @@ fn behavioral_evaluations(
     history: &[RateWindow],
     current: Option<RateWindow>,
     minimum_windows: usize,
-) -> (Vec<ConditionEvaluation>, BehavioralLimits) {
+) -> Vec<ConditionEvaluation> {
     let rate_values: Vec<f64> = history.iter().map(|window| window.query_rate).collect();
     let ratio_values: Vec<f64> = history
         .iter()
@@ -714,7 +724,6 @@ fn behavioral_evaluations(
         )
     };
 
-    let mut limits = BehavioralLimits::default();
     let mut evaluations = Vec::new();
 
     evaluations.push(match (rate_bounds, current) {
@@ -737,7 +746,6 @@ fn behavioral_evaluations(
         (Some((median, deviation)), Some(window)) => {
             let limit = (median * QUERY_RATE_MEDIAN_MULTIPLE)
                 .max(median + QUERY_RATE_DEVIATION_MULTIPLE * deviation);
-            limits.query_rate = Some(limit);
             evaluation(
                 subject.query_rate_id.clone(),
                 subject.target_id.clone(),
@@ -844,7 +852,6 @@ fn behavioral_evaluations(
                 ),
             )
         } else {
-            limits.blocked_ratio = Some(limit);
             Verdict::from_flag(
                 (ratio - median).abs() > limit,
                 (
@@ -890,7 +897,7 @@ fn behavioral_evaluations(
         ));
     }
 
-    (evaluations, limits)
+    evaluations
 }
 
 /// Behavioural conditions for one target, so that a single resolver losing
@@ -946,15 +953,14 @@ pub fn evaluate_target_behavior(
         now_unix_seconds.saturating_sub(oldest.timestamp)
             >= i64::from(config.learning_days) * 86_400
     });
-    let (evaluations, _) = behavioral_evaluations(
+    behavioral_evaluations(
         &BehavioralSubject::target(&report.id, &report.name),
         profile,
         baseline_ready,
         &history,
         current,
         config.minimum_same_hour_samples,
-    );
-    evaluations
+    )
 }
 
 pub fn evaluate_aggregate(
@@ -986,8 +992,15 @@ pub fn evaluate_aggregate(
         .iter()
         .filter_map(|report| report.operational.as_ref())
         .collect();
-    let combined_queries = operational.iter().map(|item| item.queries).sum::<u64>();
-    let combined_blocked = operational.iter().map(|item| item.blocked).sum::<u64>();
+    // Checked, not `sum()`: an overflowing total panics in debug and wraps in
+    // release, and a wrapped counter is a plausible-looking number that no
+    // resolver reported.
+    let combined_queries = operational
+        .iter()
+        .try_fold(0u64, |total, item| total.checked_add(item.queries))?;
+    let combined_blocked = operational
+        .iter()
+        .try_fold(0u64, |total, item| total.checked_add(item.blocked))?;
     let combined_blocked_ratio = if combined_queries == 0 {
         0.0
     } else {
@@ -997,18 +1010,26 @@ pub fn evaluate_aggregate(
     // from any aggregate row ever persisted. A group whose membership changed
     // has older rows for its previous shape, and judging the new group ready on
     // the strength of those would compare it against a baseline it never had.
-    let readings = combined_readings(config, target_samples);
+    let readings = combined_readings(config, target_samples)?;
     let baseline_age_seconds = readings
         .first()
         .map_or(0, |(oldest, _, _)| now_unix_seconds.saturating_sub(*oldest));
-    let same_hour: Vec<_> = readings
-        .iter()
-        .filter(|(timestamp, _, _)| {
-            local_hour_of(*timestamp, &config.time_zone) == Some(local_hour)
+    let history: Vec<RateWindow> = readings
+        .windows(2)
+        .filter_map(|pair| {
+            let hour = local_hour_of(pair[1].0, &config.time_zone)?;
+            if hour != local_hour {
+                return None;
+            }
+            window_between(pair[0], pair[1], hour)
         })
         .collect();
+    // Readiness counts the windows a comparison can actually use, not the raw
+    // readings behind them. A resolver whose counter resets between every run
+    // has readings and no windows, and reporting that as ready would contradict
+    // the conditions, which would all be learning.
     let baseline_ready = baseline_age_seconds >= i64::from(config.learning_days) * 86_400
-        && same_hour.len() >= config.minimum_same_hour_samples;
+        && history.len() >= config.minimum_same_hour_samples;
     let mut resolver_query_share = BTreeMap::new();
     let mut top_client_share = BTreeMap::new();
     for report in &members {
@@ -1024,29 +1045,17 @@ pub fn evaluate_aggregate(
             top_client_share.insert(report.id.clone(), item.top_client_share);
         }
     }
-    let mut observation = AggregateObservation {
+    let observation = AggregateObservation {
         local_hour,
         utc_offset_minutes,
         combined_queries,
         combined_blocked_ratio,
         baseline_age_seconds,
-        same_hour_samples: same_hour.len(),
+        same_hour_samples: history.len(),
         baseline_ready,
-        query_rate_limit: None,
-        blocked_ratio_limit: None,
         resolver_query_share,
         top_client_share,
     };
-    let history: Vec<RateWindow> = readings
-        .windows(2)
-        .filter_map(|pair| {
-            let hour = local_hour_of(pair[1].0, &config.time_zone)?;
-            if hour != local_hour {
-                return None;
-            }
-            window_between(pair[0], pair[1], hour)
-        })
-        .collect();
     let current = readings.last().and_then(|previous| {
         window_between(
             *previous,
@@ -1054,7 +1063,7 @@ pub fn evaluate_aggregate(
             local_hour,
         )
     });
-    let (evaluations, limits) = behavioral_evaluations(
+    let evaluations = behavioral_evaluations(
         &BehavioralSubject::aggregate(),
         profile,
         baseline_ready,
@@ -1062,8 +1071,6 @@ pub fn evaluate_aggregate(
         current,
         config.minimum_same_hour_samples,
     );
-    observation.query_rate_limit = limits.query_rate;
-    observation.blocked_ratio_limit = limits.blocked_ratio;
     Some(AggregateEvaluation {
         observation,
         evaluations,
@@ -1574,11 +1581,15 @@ mod tests {
         // Summing whatever reported would read as traffic falling by that
         // member's share, which no resolver actually saw.
         let mut targets = aggregate_history();
-        let complete = combined_readings(&group_config(), &targets).len();
+        let complete = combined_readings(&group_config(), &targets)
+            .expect("readings")
+            .len();
         let dropped = targets[targets.len() - 1].run_id.clone();
         targets.retain(|sample| sample.run_id != dropped || sample.target_id != "b");
         assert_eq!(
-            combined_readings(&group_config(), &targets).len(),
+            combined_readings(&group_config(), &targets)
+                .expect("readings")
+                .len(),
             complete - 1,
             "a run missing a declared member contributes no combined reading",
         );
@@ -1590,7 +1601,9 @@ mod tests {
         // counting readings rather than distinct members would allow.
         let config = group_config();
         let targets = aggregate_history();
-        let complete = combined_readings(&config, &targets).len();
+        let complete = combined_readings(&config, &targets)
+            .expect("readings")
+            .len();
         let run = targets[targets.len() - 1].run_id.clone();
 
         let mut without_b: Vec<TargetSample> = targets
@@ -1598,7 +1611,12 @@ mod tests {
             .filter(|sample| sample.run_id != run || sample.target_id != "b")
             .cloned()
             .collect();
-        assert_eq!(combined_readings(&config, &without_b).len(), complete - 1);
+        assert_eq!(
+            combined_readings(&config, &without_b)
+                .expect("readings")
+                .len(),
+            complete - 1
+        );
 
         let mut duplicate = without_b
             .iter()
@@ -1608,7 +1626,9 @@ mod tests {
         duplicate.queries += 1;
         without_b.push(duplicate);
         assert_eq!(
-            combined_readings(&config, &without_b).len(),
+            combined_readings(&config, &without_b)
+                .expect("readings")
+                .len(),
             complete - 1,
             "a duplicate cannot stand in for the absent member",
         );
@@ -2563,6 +2583,127 @@ mod tests {
             time_zone: "Europe/Amsterdam".to_owned(),
             learning_days: 7,
             minimum_same_hour_samples: 36,
+        }
+    }
+
+    #[test]
+    fn same_second_runs_keep_their_chronological_order() {
+        // completed_at is stored to the second, so sorting on it cannot order two
+        // runs that finished within the same second. Differencing them the wrong
+        // way round overcounts the traffic between them.
+        let config = BehavioralBaselineConfig {
+            target_ids: vec!["a".to_owned()],
+            time_zone: "Europe/Amsterdam".to_owned(),
+            learning_days: 7,
+            minimum_same_hour_samples: 36,
+        };
+        // Loader order is chronological; the identifiers sort the other way.
+        let samples = vec![
+            TargetSample {
+                run_id: "z-run".to_owned(),
+                target_id: "a".to_owned(),
+                timestamp: 100,
+                queries: 100,
+                blocked: 10,
+            },
+            TargetSample {
+                run_id: "a-run".to_owned(),
+                target_id: "a".to_owned(),
+                timestamp: 100,
+                queries: 110,
+                blocked: 11,
+            },
+            TargetSample {
+                run_id: "next".to_owned(),
+                target_id: "a".to_owned(),
+                timestamp: 400,
+                queries: 410,
+                blocked: 41,
+            },
+        ];
+        let readings = combined_readings(&config, &samples).expect("readings");
+        assert_eq!(
+            readings.iter().map(|(_, q, _)| *q).collect::<Vec<_>>(),
+            [100, 110, 410],
+            "identifier order must not reorder same-second runs",
+        );
+        let window = window_between(readings[1], readings[2], 9).expect("window");
+        assert_eq!(window.queries, 300, "410 - 110, not 410 - 100");
+    }
+
+    #[test]
+    fn an_overflowing_counter_sum_makes_the_aggregate_unavailable() {
+        // Saturating would flatten two different readings into one value and
+        // derive a window of no traffic, which is a plausible-looking number no
+        // resolver reported.
+        let config = BehavioralBaselineConfig {
+            target_ids: vec!["a".to_owned(), "b".to_owned()],
+            time_zone: "Europe/Amsterdam".to_owned(),
+            learning_days: 7,
+            minimum_same_hour_samples: 36,
+        };
+        let samples: Vec<TargetSample> = ["a", "b"]
+            .iter()
+            .map(|id| TargetSample {
+                run_id: "run".to_owned(),
+                target_id: (*id).to_owned(),
+                timestamp: 100,
+                queries: u64::MAX / 2 + 2,
+                blocked: 0,
+            })
+            .collect();
+        assert_eq!(
+            combined_readings(&config, &samples),
+            None,
+            "an overflowing sum makes the group unavailable, not saturated",
+        );
+    }
+
+    #[test]
+    fn readiness_counts_windows_rather_than_readings() {
+        // Every consecutive pair spans a counter reset, so there are plenty of
+        // old-enough readings and no windows at all. The reported readiness bit
+        // must not claim a baseline the conditions cannot use.
+        let config = group_config();
+        let mut samples = Vec::new();
+        for day in 0..8i64 {
+            for slot in 1..=12i64 {
+                for id in ["a", "b"] {
+                    samples.push(TargetSample {
+                        run_id: format!("run-{day}-{slot}"),
+                        target_id: id.to_owned(),
+                        timestamp: HOUR_NINE - day * 86_400 - slot * 300,
+                        // Later runs hold lower counters, so no pair yields a window.
+                        queries: u64::try_from(slot).expect("slot") * 1_000,
+                        blocked: u64::try_from(slot).expect("slot") * 100,
+                    });
+                }
+            }
+        }
+        samples.sort_by_key(|sample| sample.timestamp);
+        let readings = combined_readings(&config, &samples).expect("readings");
+        assert!(
+            readings.len() >= config.minimum_same_hour_samples,
+            "the readings themselves clear the count",
+        );
+        let aggregate = evaluate_aggregate(
+            &config,
+            &profile(),
+            &samples,
+            &[target("a", 5_000, 500), target("b", 5_000, 500)],
+            HOUR_NINE,
+            9,
+            60,
+        )
+        .expect("aggregate");
+        assert!(
+            !aggregate.observation.baseline_ready,
+            "readings without windows are not a usable baseline",
+        );
+        assert_eq!(aggregate.observation.same_hour_samples, 0);
+        for evaluation in &aggregate.evaluations {
+            assert_eq!(evaluation.outcome, EvaluationOutcome::NotEvaluated);
+            assert_eq!(evaluation.reason, "baseline_learning");
         }
     }
 

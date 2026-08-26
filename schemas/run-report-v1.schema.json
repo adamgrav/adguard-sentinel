@@ -10,14 +10,6 @@
         "baseline_ready": {
           "type": "boolean"
         },
-        "blocked_ratio_limit": {
-          "description": "Maximum absolute blocked-ratio deviation before that condition is active.\nPersists to the `SQLite` column `ratio_limit`, for the same reason.",
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
         "combined_blocked_ratio": {
           "format": "double",
           "type": "number"
@@ -32,14 +24,6 @@
           "maximum": 255,
           "minimum": 0,
           "type": "integer"
-        },
-        "query_rate_limit": {
-          "description": "Maximum queries per second before the query-rate condition is active.\nNamed for its unit: it is a rate, and the `SQLite` column it persists to is\nstill called `volume_limit` because renaming that would change the state\nschema checksum and reject every existing database.",
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
         },
         "resolver_query_share": {
           "additionalProperties": {

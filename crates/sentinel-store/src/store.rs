@@ -756,9 +756,8 @@ fn insert_aggregate(transaction: &Transaction<'_>, report: &RunReport) -> Result
             "INSERT INTO aggregate_observations(
                run_id, local_hour, utc_offset_minutes, combined_queries,
                combined_blocked_ratio, baseline_age_seconds, same_hour_samples,
-               baseline_ready, volume_limit, ratio_limit, resolver_query_share_json,
-               top_client_share_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+               baseline_ready, resolver_query_share_json, top_client_share_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 report.run_id,
                 i64::from(aggregate.local_hour),
@@ -768,8 +767,6 @@ fn insert_aggregate(transaction: &Transaction<'_>, report: &RunReport) -> Result
                 aggregate.baseline_age_seconds,
                 i64_from_usize(aggregate.same_hour_samples)?,
                 bool_i64(aggregate.baseline_ready),
-                aggregate.query_rate_limit,
-                aggregate.blocked_ratio_limit,
                 serde_json::to_string(&aggregate.resolver_query_share)
                     .map_err(|error| StoreError::InvalidData(error.to_string()))?,
                 serde_json::to_string(&aggregate.top_client_share)
@@ -1239,7 +1236,13 @@ fn load_aggregate(
         .query_row(
             "SELECT local_hour, utc_offset_minutes, combined_queries,
                     combined_blocked_ratio, baseline_age_seconds, same_hour_samples,
-                    baseline_ready, volume_limit, ratio_limit,
+                    baseline_ready,
+                    -- volume_limit and ratio_limit are no longer read. They held a
+                    -- query count and a deviation computed under the old
+                    -- thresholds; the limits a run applied now live in each
+                    -- condition's expected evidence, named for their units. The
+                    -- columns stay because dropping them would change the state
+                    -- schema checksum and reject every existing database.
                     resolver_query_share_json, top_client_share_json
              FROM aggregate_observations WHERE run_id = ?1",
             [run_id],
@@ -1252,10 +1255,8 @@ fn load_aggregate(
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
-                    row.get::<_, Option<f64>>(7)?,
-                    row.get::<_, Option<f64>>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             },
         )
@@ -1271,11 +1272,9 @@ fn load_aggregate(
             baseline_age_seconds: row.4,
             same_hour_samples: usize_from_i64(row.5, "same-hour sample count")?,
             baseline_ready: row.6 != 0,
-            query_rate_limit: row.7,
-            blocked_ratio_limit: row.8,
-            resolver_query_share: serde_json::from_str(&row.9)
+            resolver_query_share: serde_json::from_str(&row.7)
                 .map_err(|error| StoreError::InvalidData(error.to_string()))?,
-            top_client_share: serde_json::from_str(&row.10)
+            top_client_share: serde_json::from_str(&row.8)
                 .map_err(|error| StoreError::InvalidData(error.to_string()))?,
         })
     })
