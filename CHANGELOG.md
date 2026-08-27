@@ -3,7 +3,7 @@
 Notable changes to AdGuard Sentinel. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.3.0 — 2026-08-27
 
 The run-report `schema_version` stays `1` even though two fields are removed.
 [RELEASING.md](RELEASING.md) reserves a new report version for a removal, and

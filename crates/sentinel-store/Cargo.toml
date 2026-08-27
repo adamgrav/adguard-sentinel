@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 jiff.workspace = true
 rusqlite.workspace = true
-sentinel-core = { version = "0.2.0", path = "../sentinel-core" }
+sentinel-core = { version = "0.3.0", path = "../sentinel-core" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
