@@ -71,8 +71,9 @@ Every kind, and the reasons it can report:
 | `upstream_mode`, `upstream_set`, `rewrite_settings` | `matches_policy`, `drift` |
 | `required_filter` | `matches_policy`, `missing`, `state_drift`, `stale` |
 | `required_rewrite` | `matches_policy`, `missing_or_disabled`, `globally_disabled` |
-| `combined_query_volume` | `within_baseline`, `above_baseline`, `baseline_learning` |
-| `combined_blocked_ratio` | `within_baseline`, `outside_baseline`, `baseline_learning` |
+| `combined_query_rate`, `query_rate` | `within_baseline`, `above_baseline`, `baseline_learning`, `rate_window_unavailable` |
+| `combined_blocked_ratio`, `blocked_ratio` | `within_baseline`, `outside_baseline`, `baseline_learning`, `rate_window_unavailable`, `window_too_small` |
+| `combined_blocking_collapse`, `blocking_collapse` | `blocking_sustained`, `blocking_collapsed`, `baseline_learning`, `rate_window_unavailable`, `window_too_small` |
 
 `severity` is the one field that deliberately varies for a given `id`: an
 unreachable resolver is a warning and a rejected credential is critical, because

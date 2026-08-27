@@ -23,12 +23,42 @@ a behavior change that must be reflected here and in the run-report schema:
   state under the same condition identifier.
 - Behavioral aggregation advances only after every declared group member has a
   complete observation.
-- The baseline requires the configured age and same-local-hour sample count.
-  It uses median, scaled MAD `1.4826`, and a deviation floor of `1e-9`.
-- Query volume is active above
-  `max(3 * median, median + 8 * scaled_mad, 500)`.
-- Blocked ratio requires at least 100 queries and an absolute deviation above
-  `max(0.20, 8 * scaled_mad)`.
+- Behavioural conditions compare a measurement window, not a sample. AdGuard
+  Home resets its statistics counter on its own local hour, so one sample is a
+  partial hour total whose size depends on when in the hour it was taken. A
+  window is the difference between two consecutive samples.
+- Windows difference integer counts. A window's blocked ratio is its own
+  blocked count over its own query count, never a ratio reconstructed from a
+  cumulative one.
+- The group total is the sum of its declared members for runs where every member
+  reported. A run missing a member contributes no combined reading.
+- A pair yields no window when either counter decreased, which means the reset
+  fell between the samples, when more blocked than queried lands in the window,
+  or when more than 600 seconds separate them, which means runs were missed. Such a run leaves every behavioural condition not evaluated,
+  so it neither increments, clears, nor resolves.
+- Query rate and blocked ratio have independent baselines, each requiring the
+  configured age and count of same-local-hour windows in its own population. The
+  reported readiness bit tracks the query-rate population, which every window
+  belongs to; the blocked ratio may still be learning when it is set.
+  Every window carries a rate; only windows above the query minimum carry a
+  ratio, so one can be ready while the other is not.
+- A condition that cannot be compared says which: `baseline_learning` for a
+  history too short or too sparse, `rate_window_unavailable` for a latest pair
+  spanning a reset or a gap, `window_too_small` for a window below the query
+  minimum.
+- The baseline requires the configured age and the configured count of
+  same-local-hour windows. It uses median, scaled MAD `1.4826`, and a deviation
+  floor of `1e-9`.
+- Query rate is active above `max(3 * median, median + 4 * scaled_mad)`,
+  measured in queries per second.
+- Blocked ratio requires at least 100 queries in the window and an absolute
+  deviation above `max(0.04, 6 * scaled_mad)`. The multiple is wide on purpose:
+  a collapse to zero is the business of the blocking-collapse condition below,
+  so this one is tuned to stay quiet rather than stretched to cover both.
+- Blocking collapse requires at least 100 queries in the window and is active
+  below `0.25 * median`. It is critical rather than warning, and it is the only
+  condition that reports blocking having stopped while every declared policy
+  field still matches.
 - Retention keeps samples at the inclusive cutoff and appends only complete
   aggregate observations.
 - Alerts are batched before resolutions. External messages contain summaries

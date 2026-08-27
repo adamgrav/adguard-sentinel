@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use jiff::Timestamp;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sentinel_core::{
-    AggregateObservation, AlertDeliveryState, BaselineSample, ConditionEvaluation,
-    ConditionLifecycle, ConditionState, ConditionTransition, Config, DnsObservation, ExitReport,
-    FilterObservation, Finding, NotificationReport, NotificationStatus, OperationalObservation,
-    OutboxMessage, RewriteObservation, RunHealth, RunReport, TargetReport, TargetRuntimeState,
+    AggregateObservation, AlertDeliveryState, ConditionEvaluation, ConditionLifecycle,
+    ConditionState, ConditionTransition, Config, DnsObservation, ExitReport, FilterObservation,
+    Finding, NotificationReport, NotificationStatus, OperationalObservation, OutboxMessage,
+    RewriteObservation, RunHealth, RunReport, TargetReport, TargetRuntimeState, TargetSample,
     TargetStatus, TransitionKind, UpstreamObservation, advance_condition,
 };
 use serde::Serialize;
@@ -159,44 +159,48 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn load_baseline_samples(
+    /// Loads per-target statistics readings inside the retention window,
+    /// oldest first, for deriving per-target behavioural rates.
+    ///
+    /// Only complete observations are returned: an incomplete one has no
+    /// counter to difference against, and treating a missing reading as a
+    /// value would invent traffic that was never observed.
+    pub fn load_target_samples(
         &self,
         cutoff_unix_seconds: i64,
-    ) -> Result<Vec<BaselineSample>, StoreError> {
+    ) -> Result<Vec<TargetSample>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT r.completed_at, a.local_hour, a.combined_queries, a.combined_blocked_ratio
-             FROM aggregate_observations a
-             JOIN runs r ON r.id = a.run_id
+            "SELECT r.completed_at, t.run_id, t.target_id, t.queries, t.blocked
+             FROM target_observations t
+             JOIN runs r ON r.id = t.run_id
+             WHERE t.complete = 1 AND t.queries IS NOT NULL AND t.blocked IS NOT NULL
              ORDER BY r.completed_at ASC",
         )?;
         let rows = statement.query_map([], |row| {
             let timestamp: String = row.get(0)?;
-            let local_hour: i64 = row.get(1)?;
-            let combined_queries: i64 = row.get(2)?;
-            let combined_blocked_ratio: f64 = row.get(3)?;
-            Ok((
-                timestamp,
-                local_hour,
-                combined_queries,
-                combined_blocked_ratio,
-            ))
+            let run_id: String = row.get(1)?;
+            let target_id: String = row.get(2)?;
+            let queries: i64 = row.get(3)?;
+            let blocked: i64 = row.get(4)?;
+            Ok((timestamp, run_id, target_id, queries, blocked))
         })?;
         let mut samples = Vec::new();
         for row in rows {
-            let (timestamp, local_hour, combined_queries, combined_blocked_ratio) = row?;
+            let (timestamp, run_id, target_id, queries, blocked) = row?;
             let timestamp = parse_timestamp(&timestamp)?;
             if timestamp < cutoff_unix_seconds {
                 continue;
             }
-            samples.push(BaselineSample {
+            samples.push(TargetSample {
+                run_id,
+                target_id,
                 timestamp,
-                local_hour: u8::try_from(local_hour).map_err(|_| {
-                    StoreError::InvalidData("local hour is out of range".to_owned())
+                queries: u64::try_from(queries).map_err(|_| {
+                    StoreError::InvalidData("target query count is negative".to_owned())
                 })?,
-                combined_queries: u64::try_from(combined_queries).map_err(|_| {
-                    StoreError::InvalidData("combined query count is negative".to_owned())
+                blocked: u64::try_from(blocked).map_err(|_| {
+                    StoreError::InvalidData("target blocked count is negative".to_owned())
                 })?,
-                combined_blocked_ratio,
             });
         }
         Ok(samples)
@@ -752,9 +756,8 @@ fn insert_aggregate(transaction: &Transaction<'_>, report: &RunReport) -> Result
             "INSERT INTO aggregate_observations(
                run_id, local_hour, utc_offset_minutes, combined_queries,
                combined_blocked_ratio, baseline_age_seconds, same_hour_samples,
-               baseline_ready, volume_limit, ratio_limit, resolver_query_share_json,
-               top_client_share_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+               baseline_ready, resolver_query_share_json, top_client_share_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 report.run_id,
                 i64::from(aggregate.local_hour),
@@ -764,8 +767,6 @@ fn insert_aggregate(transaction: &Transaction<'_>, report: &RunReport) -> Result
                 aggregate.baseline_age_seconds,
                 i64_from_usize(aggregate.same_hour_samples)?,
                 bool_i64(aggregate.baseline_ready),
-                aggregate.volume_limit,
-                aggregate.ratio_limit,
                 serde_json::to_string(&aggregate.resolver_query_share)
                     .map_err(|error| StoreError::InvalidData(error.to_string()))?,
                 serde_json::to_string(&aggregate.top_client_share)
@@ -1235,7 +1236,13 @@ fn load_aggregate(
         .query_row(
             "SELECT local_hour, utc_offset_minutes, combined_queries,
                     combined_blocked_ratio, baseline_age_seconds, same_hour_samples,
-                    baseline_ready, volume_limit, ratio_limit,
+                    baseline_ready,
+                    -- volume_limit and ratio_limit are no longer read. They held a
+                    -- query count and a deviation computed under the old
+                    -- thresholds; the limits a run applied now live in each
+                    -- condition's expected evidence, named for their units. The
+                    -- columns stay because dropping them would change the state
+                    -- schema checksum and reject every existing database.
                     resolver_query_share_json, top_client_share_json
              FROM aggregate_observations WHERE run_id = ?1",
             [run_id],
@@ -1248,10 +1255,8 @@ fn load_aggregate(
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
-                    row.get::<_, Option<f64>>(7)?,
-                    row.get::<_, Option<f64>>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             },
         )
@@ -1267,11 +1272,9 @@ fn load_aggregate(
             baseline_age_seconds: row.4,
             same_hour_samples: usize_from_i64(row.5, "same-hour sample count")?,
             baseline_ready: row.6 != 0,
-            volume_limit: row.7,
-            ratio_limit: row.8,
-            resolver_query_share: serde_json::from_str(&row.9)
+            resolver_query_share: serde_json::from_str(&row.7)
                 .map_err(|error| StoreError::InvalidData(error.to_string()))?,
-            top_client_share: serde_json::from_str(&row.10)
+            top_client_share: serde_json::from_str(&row.8)
                 .map_err(|error| StoreError::InvalidData(error.to_string()))?,
         })
     })

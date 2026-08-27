@@ -3,6 +3,107 @@
 Notable changes to AdGuard Sentinel. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+The run-report `schema_version` stays `1` even though two fields are removed.
+[RELEASING.md](RELEASING.md) reserves a new report version for a removal, and
+this is a deliberate exception taken while the project is pre-1.0 and has no
+known consumers: a version bump would have to be spent again on the first real
+break, and carrying a field whose historical values mean something different is
+worse than removing it. Revisit the moment anything is observed reading the
+report.
+
+### Fixed
+
+- Behavioural conditions now compare a measurement window rather than a raw
+  statistics sample. AdGuard Home resets its counter on its own local hour, so a
+  sample is a partial hour total whose size depends mostly on when in the hour it
+  was taken; on a live deployment the same traffic read as 169 queries just after
+  a reset and 10,167 just before one. The query-volume condition was
+  consequently unable to fire at all: a ramp sampled uniformly has a maximum near
+  twice its median and the threshold was three times it. The blocked-ratio
+  condition could fire, but only on a large upward excursion — its thresholds are
+  a separate defect, below.
+- The blocked-ratio condition could not detect blocking failing. Its absolute
+  deviation floor of `0.20` was wider than the entire observed range of the
+  ratio, and the `8 * scaled_mad` term was between 1.4 and 3.3 times the median
+  in every hour, so either alone was enough to hide a collapse to zero. The
+  floor is now `0.04` and the multiple `6`, chosen against 7.7 days of live
+  samples: no false-positive latch on either resolver across the whole history.
+  Where dispersion is comparable to the median, as it is there, six scaled
+  deviations exceed what a collapse to zero can produce, which is deliberate — collapse is the business of `blocking-collapsed`, so the deviation
+  rule is tuned to stay quiet rather than stretched across both jobs. At four it
+  produced a spurious warning about once a week on one resolver, which the group
+  average had hidden.
+
+### Added
+
+- Query rate and blocked ratio now have independent baselines. Every window
+  carries a rate but only windows above the query minimum carry a comparable
+  ratio, so a sparse ratio population could suppress a fully-populated rate
+  baseline, and a large rate population could admit a critical comparison
+  against a one-point ratio history.
+- Behavioural group membership is keyed on the run rather than a
+  second-resolution timestamp, and counts distinct members, so a duplicated
+  reading cannot stand in for a member that never reported.
+- Aggregate baseline age and readiness derive from the readings the comparison
+  uses, not from previously persisted aggregate rows, which could belong to a
+  different group membership.
+- A condition that cannot be compared reports why. Previously every such case
+  claimed the baseline was still learning, so a trained baseline whose latest
+  pair spanned a counter reset was reported as learning and the documented
+  `baseline_learning` reason was unreachable.
+- `aggregate.same_hour_samples` and `aggregate.baseline_ready` count windows
+  rather than raw readings, so both are narrower than the same fields on runs
+  recorded earlier: windows are the subset of readings a comparison can use, and
+  a pair spanning the hourly counter reset yields none. Expect the reported count
+  to fall by roughly the share of pairs that span a reset. `baseline_ready`
+  tracks the query-rate population, which every window belongs to; the blocked
+  ratio has its own narrower population and can still be learning when the bit
+  is set.
+- `volume_limit` and `ratio_limit` are removed from the aggregate observation
+  in the run report. The limits a run applied are already reported on each
+  condition, under keys naming their units, so the observation copy only
+  duplicated them. It could not be renamed in place: rows written before this
+  release hold a query count in `volume_limit`, and reading those as a rate would
+  relabel history. The SQLite columns stay, unread and unwritten, because
+  dropping them would change the state schema checksum and reject every existing
+  database.
+- Behavioural windows difference integer counts, and the group total is summed
+  from its declared members rather than taken from a stored combined ratio.
+  Reconstructing a blocked count from a ratio and differencing two of those can
+  round to zero, which is indistinguishable from blocking having stopped on a
+  condition that pages.
+- Per-target behavioural conditions `target:<id>:query-rate`,
+  `target:<id>:blocked-ratio`, and `target:<id>:blocking-collapsed`, for targets
+  named in `[behavioral_baseline].target_ids`. A group total dilutes a single
+  resolver: one of two losing blocking entirely moves the combined ratio by half
+  of what it moved on that resolver. Configurations without `[behavioral_baseline]`,
+  and targets not named in it, gain no conditions.
+- `aggregate:blocking-collapsed`, a critical condition that reports blocking
+  having nearly stopped. This is the case a policy check cannot see: protection
+  enabled, every declared filter present, enabled, and fresh, and nothing being
+  blocked. See [ADR 0012](docs/decisions/0012-behavioral-conditions-measure-rates.md).
+
+### Changed
+
+- `aggregate:query-spike` (kind `combined_query_volume`) is retired and replaced
+  by `aggregate:query-rate` (kind `combined_query_rate`), measured in queries per
+  second. ADR 0010 requires `kind` to be stable for an `id` across releases, and
+  a rate is a different quantity from a count rather than a better measurement of
+  it. `aggregate:blocked-ratio` keeps its identifier and kind, because only its
+  measurement window changed. Neither retired condition had ever been active, so
+  no latch was carried.
+- `aggregate_observations.volume_limit` now holds a queries-per-second limit
+  rather than a query count, and `ratio_limit` a deviation computed with the new
+  multiple. The state schema and its checksum are unchanged, so existing
+  databases open without migration and the accumulated baseline is not
+  discarded. New rows leave the legacy `volume_limit` and `ratio_limit` columns
+  null; nothing reads them.
+- A run whose sample pair spans the hourly counter reset, or a gap longer than
+  600 seconds, leaves the behavioural conditions not evaluated rather than
+  guessing the elapsed traffic. About one run in eleven on a five-minute timer.
+
 ## 0.2.0 — 2026-08-20
 
 Every configuration accepted by v0.1.3 remains valid and keeps the same target
@@ -166,7 +267,7 @@ The run-report `schema_version` stays `1`. Two fields are renamed and the values
   future `0.108.0` would have stopped every deployment. A different range can now
   be configured deliberately, and every run warns that it carries no evidence.
   Enforcement at the request boundary is unchanged.
-- Configuration errors name the offending value. `target "maxwell" references
+- Configuration errors name the offending value. `target "resolver-a" references
   unknown policy` is now `... unknown policy "nope"`, and the same applies to
   condition profiles, filter URLs, rewrites, behavioural baseline target ids, and
   each out-of-range condition profile count.

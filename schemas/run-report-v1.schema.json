@@ -25,13 +25,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "ratio_limit": {
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
         "resolver_query_share": {
           "additionalProperties": {
             "format": "double",
@@ -54,13 +47,6 @@
         "utc_offset_minutes": {
           "format": "int32",
           "type": "integer"
-        },
-        "volume_limit": {
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
         }
       },
       "required": [

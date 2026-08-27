@@ -19,7 +19,8 @@ use sentinel_core::{
     AlertDeliveryState, Clock, Config, EvaluationOutcome, ExitReport, NotificationProvider,
     NotificationStatus, REPORT_SCHEMA_VERSION, RunHealth, RunMode, RunReport, RunStatus,
     STATE_SCHEMA_VERSION, Severity, SystemClock, TargetAuth, TargetReport, TargetStatus,
-    TransitionKind, evaluate_aggregate, evaluate_target, local_time_bucket,
+    TransitionKind, evaluate_aggregate, evaluate_target, evaluate_target_behavior,
+    local_time_bucket,
 };
 use sentinel_store::{NotificationAttemptOutcome, StateStore, canonical_state_schema};
 use tracing_subscriber::EnvFilter;
@@ -329,15 +330,31 @@ async fn check_with_sink(
             .map_err(|error| {
                 CommandError::invocation(anyhow!("invalid behavior time zone: {error}"))
             })?;
-        let baseline_samples = store
-            .load_baseline_samples(cutoff_unix_seconds)
+        let target_samples = store
+            .load_target_samples(cutoff_unix_seconds)
             .map_err(CommandError::state)?;
         let aggregate_profile =
             baseline_profile(&config, baseline).map_err(CommandError::invocation)?;
+        for target in &targets {
+            let profile = config
+                .targets
+                .iter()
+                .find(|declared| declared.id == target.id)
+                .and_then(|declared| config.condition_profiles.get(&declared.condition_profile))
+                .unwrap_or(aggregate_profile);
+            evaluations.extend(evaluate_target_behavior(
+                baseline,
+                profile,
+                target,
+                &target_samples,
+                now_unix_seconds,
+                local_hour,
+            ));
+        }
         evaluate_aggregate(
             baseline,
             aggregate_profile,
-            &baseline_samples,
+            &target_samples,
             &targets,
             now_unix_seconds,
             local_hour,
@@ -1100,6 +1117,10 @@ minimum_same_hour_samples = 36
         }
     }
 
+    /// Kinds produced by the behavioural baseline, which only exist for targets
+    /// named in `[behavioral_baseline].target_ids`.
+    const BEHAVIORAL_KINDS: [&str; 3] = ["query_rate", "blocked_ratio", "blocking_collapse"];
+
     #[tokio::test]
     async fn a_v0_1_3_configuration_keeps_its_target_evaluations() {
         let server = MockServer::start_async().await;
@@ -1119,6 +1140,7 @@ minimum_same_hour_samples = 36
             .evaluations
             .iter()
             .filter(|evaluation| evaluation.target_id.as_deref() == Some("resolver-a"))
+            .filter(|evaluation| !BEHAVIORAL_KINDS.contains(&evaluation.kind.as_str()))
             .map(|evaluation| {
                 (
                     evaluation.id.as_str(),
@@ -1172,6 +1194,30 @@ minimum_same_hour_samples = 36
                     "upstream_set",
                     "matches_policy",
                     EvaluationOutcome::Clear,
+                ),
+            ]
+        );
+        let behavioral: Vec<_> = report
+            .evaluations
+            .iter()
+            .filter(|evaluation| evaluation.target_id.as_deref() == Some("resolver-a"))
+            .filter(|evaluation| BEHAVIORAL_KINDS.contains(&evaluation.kind.as_str()))
+            .map(|evaluation| (evaluation.id.as_str(), evaluation.outcome))
+            .collect();
+        assert_eq!(
+            behavioral,
+            [
+                (
+                    "target:resolver-a:blocked-ratio",
+                    EvaluationOutcome::NotEvaluated,
+                ),
+                (
+                    "target:resolver-a:blocking-collapsed",
+                    EvaluationOutcome::NotEvaluated,
+                ),
+                (
+                    "target:resolver-a:query-rate",
+                    EvaluationOutcome::NotEvaluated
                 ),
             ]
         );
