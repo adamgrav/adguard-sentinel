@@ -1,17 +1,15 @@
 # State migration
 
-## SQLite
+`check` creates new SQLite v1 state but never upgrades an existing schema.
+`migrate-state --state PATH` currently creates or validates v1 and refuses other
+versions. There is no older Sentinel schema to migrate, and the command does not
+convert external monitor state.
 
-Migrations are explicit and transactional. The running `check` command never
-upgrades an existing schema. Each future released schema must include forward
-fixtures from every prior version and preserve a pre-migration backup.
+Future SQLite upgrades must be transactional, preserve a pre-migration backup,
+and have fixtures from every supported predecessor. Before replacing a binary,
+read [CHANGELOG](../CHANGELOG.md) for upgrade and rollback requirements.
 
-Schema v1 has no predecessor. `migrate-state --state PATH` creates or validates
-the current database and refuses unsupported versions. It does not infer,
-convert, or delete external state.
-
-A first deployment with `[behavioral_baseline]` configured starts a fresh
-baseline. This is intentional: operational and declared-policy findings are
-immediately active, while query-volume and blocked-ratio findings wait for their
-configured learning window. Omitting the section disables those aggregate
-observations and conditions entirely.
+Behavioral windows are derived from stored target counters, so 0.3.0 reuses
+existing samples without a state migration. Historical report interpretation
+and pre-1.0 compatibility are described in [SCHEMAS](SCHEMAS.md#historical-reports)
+and [RELEASING](../RELEASING.md#compatibility).

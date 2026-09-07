@@ -1121,10 +1121,9 @@ pub fn advance_condition(
                 state.lifecycle = ConditionLifecycle::Clear;
                 state.first_observed_at = None;
                 if was_firing
-                    && matches!(
-                        state.alert_delivery_state,
-                        AlertDeliveryState::Delivered | AlertDeliveryState::Suppressed
-                    )
+                    && (state.alert_delivery_state == AlertDeliveryState::Delivered
+                        || (suppress_notifications
+                            && state.alert_delivery_state == AlertDeliveryState::Suppressed))
                 {
                     state.last_transition_run = Some(run_id.to_owned());
                     state.alert_delivery_state = if suppress_notifications {

@@ -1630,6 +1630,129 @@ minimum_same_hour_samples = 36
         resolution.assert_calls_async(1).await;
     }
 
+    #[tokio::test]
+    async fn enabling_notifications_does_not_resolve_a_suppressed_alert() {
+        let server = MockServer::start_async().await;
+        let _drifted = serve_golden(&server).await;
+        let pushover = MockServer::start_async().await;
+        let delivery = pushover
+            .mock_async(|when, then| {
+                when.method(POST).path("/");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"status":1,"request":"synthetic-request-id"}"#);
+            })
+            .await;
+        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+
+        assert_eq!(run(&harness, FailOn::Never).await.expect("disabled run"), 0);
+        assert_eq!(
+            latest_report(&harness).notifications[0].status,
+            NotificationStatus::Suppressed
+        );
+        rewrite_config(
+            &harness,
+            "[notifications]\nprovider = \"disabled\"",
+            &pushover_block(
+                &harness.config_path.with_file_name("pushover-token"),
+                &harness.config_path.with_file_name("pushover-user"),
+            ),
+        );
+        assert_eq!(
+            run_notifying(&harness, &pushover, "2027-01-15T08:05:00Z")
+                .await
+                .expect("enabled run"),
+            0
+        );
+        assert!(latest_report(&harness).notifications.is_empty());
+
+        server.reset_async().await;
+        let _recovered =
+            serve_golden_replacing(&server, "/control/dns_info", DNS_INFO_PARALLEL).await;
+        assert_eq!(
+            run_notifying(&harness, &pushover, "2027-01-15T08:10:00Z")
+                .await
+                .expect("recovery run"),
+            0
+        );
+        let recovered = latest_report(&harness);
+        assert!(recovered.findings.is_empty());
+        assert!(recovered.transitions.is_empty());
+        assert!(recovered.notifications.is_empty());
+        delivery.assert_calls_async(0).await;
+
+        server.reset_async().await;
+        let _recurrence = serve_golden(&server).await;
+        assert_eq!(
+            run_notifying(&harness, &pushover, "2027-01-15T08:15:00Z")
+                .await
+                .expect("new alert run"),
+            0
+        );
+        let recurrence = latest_report(&harness);
+        assert_eq!(recurrence.notifications.len(), 1);
+        assert_eq!(
+            recurrence.notifications[0].transition,
+            sentinel_core::TransitionKind::Alert
+        );
+        assert_eq!(
+            recurrence.notifications[0].status,
+            NotificationStatus::Delivered
+        );
+        delivery.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn dry_and_disabled_runs_keep_simulated_resolutions() {
+        for dry_run in [true, false] {
+            let server = MockServer::start_async().await;
+            let _drifted = serve_golden(&server).await;
+            let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+            assert_eq!(
+                check(
+                    &harness.config_path,
+                    dry_run,
+                    OutputFormat::Json,
+                    FailOn::Never,
+                    &at(REFERENCE_INSTANT),
+                )
+                .await
+                .expect("suppressed alert"),
+                0
+            );
+            assert_eq!(
+                latest_report(&harness).notifications[0].status,
+                NotificationStatus::Suppressed
+            );
+            server.reset_async().await;
+            let _recovered =
+                serve_golden_replacing(&server, "/control/dns_info", DNS_INFO_PARALLEL).await;
+            assert_eq!(
+                check(
+                    &harness.config_path,
+                    dry_run,
+                    OutputFormat::Json,
+                    FailOn::Never,
+                    &at("2027-01-15T08:05:00Z"),
+                )
+                .await
+                .expect("suppressed resolution"),
+                0
+            );
+            let recovered = latest_report(&harness);
+            assert!(recovered.findings.is_empty());
+            assert_eq!(recovered.notifications.len(), 1);
+            assert_eq!(
+                recovered.notifications[0].transition,
+                sentinel_core::TransitionKind::Resolution
+            );
+            assert_eq!(
+                recovered.notifications[0].status,
+                NotificationStatus::Suppressed
+            );
+        }
+    }
+
     fn alert_message() -> OutboxMessage {
         OutboxMessage {
             id: "synthetic-outbox-id".to_owned(),
@@ -1845,7 +1968,7 @@ minimum_same_hour_samples = 36
     }
 
     #[tokio::test]
-    async fn persisted_reports_match_the_checked_in_run_report_schema() {
+    async fn persisted_reports_match_top_level_schema_properties_and_round_trip() {
         let server = MockServer::start_async().await;
         let _mocks = serve_golden(&server).await;
         let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);

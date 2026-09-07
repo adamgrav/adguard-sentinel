@@ -3,22 +3,43 @@
 Notable changes to AdGuard Sentinel. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- Enabling notifications after a suppressed alert no longer sends a resolution
+  for that unsent alert. New episodes still alert normally; dry-run and disabled
+  mode retain simulated resolutions.
+- Pending notifications with the same creation time send alerts before
+  resolutions, independent of their generated IDs. Older queued work stays first.
+- Installation instructions select the Cargo package `sentinel-cli` and load
+  private systemd configuration through credentials for the dynamic service user.
+
+### Changed
+
+- Added complete Pushover setup and corrected behavioral, report-history,
+  support, test-coverage, and privacy guidance.
+- Consolidated documentation and recorded the intentional pre-1.0 compatibility
+  policy and documentation editing standard.
+
+Configuration, report, and SQLite schemas are unchanged. No migration is needed.
+
 ## 0.3.0 — 2026-08-27
 
 This release makes behavioural alerts evaluate traffic over time instead of
 comparing raw AdGuard Home counters, which reset every hour.
 
 Existing state databases open without migration, and accumulated baselines are
-preserved. The run-report schema remains at version 1, but removes two fields as
-a deliberate pre-1.0 exception because there are no known consumers.
+preserved. Run-report v1 removes two fields under the
+[pre-1.0 compatibility policy](RELEASING.md#compatibility).
 
 ### Fixed
 
 - Query-rate conditions now compare consecutive readings, so hourly counter
   resets no longer prevent traffic changes from being detected.
-- Blocked-ratio thresholds now detect a collapse in blocking. The new `0.04`
-  floor and `6 × scaled_mad` threshold produced no false-positive latches when
-  replayed against 7.7 days of live samples.
+- Blocked-ratio deviation uses a `0.04` floor and `6 × scaled_mad` threshold.
+  Blocking collapse is evaluated separately. Calibration evidence and its limits
+  are recorded in [ADR 0012](docs/decisions/0012-behavioral-conditions-measure-rates.md#evidence-and-limits).
 - Query and blocked counts are calculated from exact integer differences,
   avoiding rounding that could incorrectly appear as zero blocked requests.
 - Aggregate totals are calculated from their declared targets.
@@ -26,8 +47,9 @@ a deliberate pre-1.0 exception because there are no known consumers.
 ### Added
 
 - A critical `blocking-collapsed` condition for both the aggregate group and
-  individual targets. It detects when protection is enabled and filters are
-  current, but no requests are being blocked.
+  individual targets. It detects a window's blocked ratio falling below a
+  quarter of its baseline median, independently of declared policy. This is a
+  traffic anomaly, not proof that filtering stopped.
 - Per-target `query-rate` and `blocked-ratio` conditions for targets configured
   in `[behavioral_baseline].target_ids`. Configurations without this section are
   unchanged.
@@ -38,17 +60,15 @@ the design details.
 ### Changed
 
 - Replaced `aggregate:query-spike` with `aggregate:query-rate`, measured in
-  queries per second. No previous latch needs to be carried forward because the
-  retired condition was never active.
+  queries per second. No latch is transferred to the new condition ID.
 - Removed `volume_limit` and `ratio_limit` from aggregate observations. Each
   condition already reports its applied limit with the correct unit.
 - `same_hour_samples` and `baseline_ready` now count valid windows rather than
   raw readings, so their values will be lower than in earlier releases.
 - Query rate and blocked ratio now maintain separate baselines. Ratio comparisons
   require a window containing at least 100 queries.
-- Windows spanning a counter reset or a gap longer than 10 minutes are reported
-  as not evaluated instead of estimating the missing traffic. On a five-minute
-  schedule, this affects approximately one run in eleven.
+- Pairs with decreasing counters or gaps longer than 10 minutes produce no
+  measurement window; conditions remain not evaluated.
 
 ## 0.2.0 — 2026-08-20
 
@@ -282,7 +302,4 @@ The first release. Everything below is new.
 
 ---
 
-Versioning and release policy lives in [RELEASING.md](RELEASING.md). In short:
-four surfaces version independently — the release tag, the configuration
-`schema_version`, the run-report `schema_version`, and the SQLite
-`user_version` — and `check` never migrates state on its own.
+Versioning and release policy: [RELEASING.md](RELEASING.md).

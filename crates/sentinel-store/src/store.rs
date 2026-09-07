@@ -315,7 +315,9 @@ impl StateStore {
              FROM notification_outbox
              WHERE status IN ('pending', 'retryable')
                AND (next_retry_at IS NULL OR next_retry_at <= ?1)
-             ORDER BY created_at ASC, id ASC",
+             ORDER BY created_at ASC,
+                      CASE transition WHEN 'alert' THEN 0 ELSE 1 END ASC,
+                      id ASC",
         )?;
         let rows = statement.query_map([now], |row| {
             Ok((
@@ -1583,6 +1585,48 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("ids");
         assert_eq!(ids, vec!["cutoff".to_owned(), "new".to_owned()]);
+    }
+
+    #[test]
+    fn pending_batches_keep_age_order_and_send_alerts_first_at_equal_times() {
+        let directory = tempdir().expect("tempdir");
+        let store = StateStore::open(&directory.path().join("state.sqlite")).expect("store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO runs(
+                   id, started_at, completed_at, mode, config_sha256, status,
+                   expected_targets, complete_targets, minimum_targets, exit_code
+                 ) VALUES ('run', ?1, ?1, 'live', 'sha256:synthetic', 'complete', 1, 1, 1, 0)",
+                ["2026-01-01T00:00:00Z"],
+            )
+            .expect("run");
+        // IDs deliberately sort the newer resolution before the alert.
+        for (id, kind, created_at) in [
+            ("z-old-resolution", "resolution", "2026-01-01T00:00:00Z"),
+            ("a-resolution", "resolution", "2026-01-01T00:05:00Z"),
+            ("z-alert", "alert", "2026-01-01T00:05:00Z"),
+        ] {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO notification_outbox(
+                       id, run_id, transition, title, message, priority, status, created_at
+                     ) VALUES (?1, 'run', ?2, 'title', '- summary', 0, 'pending', ?3)",
+                    params![id, kind, created_at],
+                )
+                .expect("outbox");
+        }
+        let pending = store
+            .pending_outbox("2026-01-01T00:05:00Z")
+            .expect("pending");
+        assert_eq!(
+            pending
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z-old-resolution", "z-alert", "a-resolution"]
+        );
     }
 
     #[test]

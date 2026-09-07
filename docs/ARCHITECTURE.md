@@ -19,7 +19,7 @@ TOML validation
   -> bounded target observation
   -> strict response normalization
   -> per-target operational and declared-policy evaluation
-  -> optional explicit-group behavioral evaluation
+  -> optional per-target and explicit-group behavioral evaluation
   -> atomic run/state/outbox transaction
   -> notification delivery after commit
   -> versioned report and exit status
@@ -27,7 +27,9 @@ TOML validation
 
 Targets are observed concurrently under one semaphore. Requests within one
 target are sequential and can only call typed GET methods. Target data is not
-combined except for the configured query-volume and blocked-ratio baseline.
+combined except for the configured group's query-rate, blocked-ratio, and
+blocking-collapse evaluations. Group members also have independent behavioral
+evaluations.
 
 The store persists normalized observations and condition state. A completed run
 is inserted with its evaluations, latch changes, pruning, and notification

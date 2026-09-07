@@ -16,6 +16,18 @@ relevant ADRs in `docs/decisions/` before editing.
 - Never deploy, publish, push, tag, sign, or send real notifications without
   explicit authorization.
 
+## Documentation
+
+- Every word must justify its existence. Keep text that helps a reader act,
+  understand behavior, or assess a decision. Remove repetition, filler,
+  self-praise, and obsolete narrative.
+- Give each rule one authoritative home; repeat it only where needed to prevent
+  a likely mistake. Verify commands and claims against the implementation, name
+  any untested steps, and read the affected document as a whole after editing.
+- Follow the intentional pre-1.0 report compatibility flexibility in
+  `RELEASING.md`. Document changes; do not require a report schema bump solely
+  to enforce a 1.0 promise.
+
 ## Workflow
 
 - Work on a feature branch and preserve unrelated changes.

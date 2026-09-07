@@ -2,7 +2,8 @@
 
 Status: accepted.
 
-Confirmed success requires HTTP 200 and JSON `status=1`. Definitely undelivered
+Confirmed success requires HTTP 200, JSON `status=1`, and a nonempty request ID.
+Definitely undelivered
 retryable attempts remain pending. Permanent rejections fail. A timeout or
 connection loss after transmission is quarantined as unknown and never resent
 automatically. A resolution is eligible only after confirmed alert delivery.
