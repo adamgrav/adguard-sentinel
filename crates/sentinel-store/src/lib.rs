@@ -2,4 +2,6 @@
 
 mod store;
 
-pub use store::{NotificationAttemptOutcome, StateStore, StoreError, canonical_state_schema};
+pub use store::{
+    NotificationAttempt, NotificationAttemptOutcome, StateStore, StoreError, canonical_state_schema,
+};

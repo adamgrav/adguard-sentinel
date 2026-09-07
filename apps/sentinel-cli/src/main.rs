@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+mod crash_tests;
 mod notify;
+mod render;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,17 +19,17 @@ use schemars::schema_for;
 use secrecy::SecretString;
 use sentinel_adguard::{AdGuardError, AdGuardReadClient, ReqwestAdGuardClient};
 use sentinel_core::{
-    AlertDeliveryState, Clock, Config, EvaluationOutcome, ExitReport, NotificationProvider,
-    NotificationStatus, REPORT_SCHEMA_VERSION, RunHealth, RunMode, RunReport, RunStatus,
-    STATE_SCHEMA_VERSION, Severity, SystemClock, TargetAuth, TargetReport, TargetStatus,
-    TransitionKind, evaluate_aggregate, evaluate_target, evaluate_target_behavior,
-    local_time_bucket,
+    Clock, Config, EvaluationOutcome, ExitReport, NotificationProvider, REPORT_SCHEMA_VERSION,
+    RunHealth, RunMode, RunReport, RunStatus, STATE_SCHEMA_VERSION, Severity, SystemClock,
+    TargetAuth, TargetReport, TargetStatus, evaluate_aggregate, evaluate_target,
+    evaluate_target_behavior, local_time_bucket,
 };
 use sentinel_store::{NotificationAttemptOutcome, StateStore, canonical_state_schema};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::notify::PushoverClient;
+use crate::render::output_reports;
 
 #[derive(Debug, Parser)]
 #[command(name = "adguard-sentinel", version, about)]
@@ -77,8 +80,12 @@ enum Command {
         /// Only print runs completed at or after this RFC3339 timestamp.
         #[arg(long)]
         since: Option<String>,
+        /// Explain each condition, including evidence and sustain/recovery progress.
+        /// Available only with human output.
+        #[arg(long)]
+        explain: bool,
     },
-    /// Create a state database, or validate that an existing one is current.
+    /// Create or explicitly migrate state, backing up a released schema before upgrade.
     /// Never run implicitly by `check`.
     MigrateState {
         /// Path to the state database to create or validate.
@@ -90,7 +97,7 @@ enum Command {
         /// Which schema to print.
         #[arg(value_enum)]
         kind: SchemaKind,
-        /// Schema version. Only version 1 exists.
+        /// Schema version. Configuration/report: 1. State: 1 or 2.
         #[arg(long, default_value_t = 1)]
         version: u32,
     },
@@ -177,7 +184,8 @@ async fn execute(cli: Cli) -> Result<u8, CommandError> {
             format,
             limit,
             since,
-        } => report(&state, format, limit, since.as_deref()),
+            explain,
+        } => report(&state, format, limit, since.as_deref(), explain),
         Command::MigrateState { state } => migrate_state(&state),
         Command::PrintSchema { kind, version } => print_schema(kind, version),
     }
@@ -227,15 +235,17 @@ async fn check_with_sink(
     store
         .ensure_run_mode(run_mode)
         .map_err(CommandError::state)?;
-    if let Some(latest) = store
-        .latest_completed_unix_seconds()
-        .map_err(CommandError::state)?
-        && now_unix_seconds < latest
+    if let Some(latest) = store.latest_completed_at().map_err(CommandError::state)?
+        && started < latest
     {
         return Err(CommandError::state(anyhow!(
             "wall clock regressed behind the latest completed run; state was not advanced"
         )));
     }
+    let recovered_attempts = store
+        .recover_interrupted_attempts(&started.to_string())
+        .map_err(CommandError::state)?;
+    let recovered_delivery_failure = !recovered_attempts.is_empty();
     let client = Arc::new(
         ReqwestAdGuardClient::new(
             config.observation.request_timeout_ms,
@@ -323,10 +333,17 @@ async fn check_with_sink(
         ));
     }
 
-    let cutoff_unix_seconds =
-        now_unix_seconds.saturating_sub(i64::from(config.state.retention_days) * 86_400);
+    let completed = clock.now();
+    if completed < started {
+        return Err(CommandError::state(anyhow!(
+            "wall clock regressed during observation; state was not advanced"
+        )));
+    }
+    let cutoff_unix_seconds = completed
+        .as_second()
+        .saturating_sub(i64::from(config.state.retention_days) * 86_400);
     let aggregate_evaluation = if let Some(baseline) = &config.behavioral_baseline {
-        let (local_hour, utc_offset_minutes) = local_time_bucket(started, &baseline.time_zone)
+        let (local_hour, utc_offset_minutes) = local_time_bucket(completed, &baseline.time_zone)
             .map_err(|error| {
                 CommandError::invocation(anyhow!("invalid behavior time zone: {error}"))
             })?;
@@ -347,7 +364,7 @@ async fn check_with_sink(
                 profile,
                 target,
                 &target_samples,
-                now_unix_seconds,
+                completed.as_second(),
                 local_hour,
             ));
         }
@@ -356,7 +373,7 @@ async fn check_with_sink(
             aggregate_profile,
             &target_samples,
             &targets,
-            now_unix_seconds,
+            completed.as_second(),
             local_hour,
             utc_offset_minutes,
         )
@@ -370,7 +387,6 @@ async fn check_with_sink(
         evaluations.extend(value.evaluations);
     }
     evaluations.sort_by(|left, right| left.id.cmp(&right.id));
-    let completed = clock.now();
     let complete_targets = targets.iter().filter(|target| target.complete).count();
     let health_met = complete_targets >= config.observation.minimum_complete_targets;
     let mut health_issues = targets
@@ -390,7 +406,9 @@ async fn check_with_sink(
     let fail_on_match = evaluations.iter().any(|evaluation| {
         evaluation.outcome == EvaluationOutcome::Active && fail_on.matches(evaluation.severity)
     });
-    let initial_exit = if health_met {
+    let initial_exit = if recovered_delivery_failure {
+        4
+    } else if health_met {
         u8::from(fail_on_match)
     } else {
         3
@@ -399,8 +417,8 @@ async fn check_with_sink(
         schema_version: REPORT_SCHEMA_VERSION,
         run_id: Uuid::new_v4().to_string(),
         mode: run_mode,
-        started_at: started.to_string(),
-        completed_at: completed.to_string(),
+        started_at: format!("{started:.9}"),
+        completed_at: format!("{completed:.9}"),
         config_sha256: config.fingerprint(),
         state_schema_version: STATE_SCHEMA_VERSION,
         run_status: if !health_met {
@@ -419,6 +437,7 @@ async fn check_with_sink(
         findings: Vec::new(),
         transitions: Vec::new(),
         notifications: Vec::new(),
+        delivery_activity: recovered_attempts,
         health: RunHealth {
             minimum_complete_targets: config.observation.minimum_complete_targets,
             complete_targets,
@@ -442,13 +461,13 @@ async fn check_with_sink(
         .commit_run(
             &mut report,
             &config,
-            now_unix_seconds,
+            completed.as_second(),
             &retention_cutoff,
             suppress_notifications,
         )
         .map_err(CommandError::state)?;
 
-    let mut notification_failed = false;
+    let mut notification_failed = recovered_delivery_failure;
     if !suppress_notifications {
         let pending = store
             .pending_outbox(&clock.now().to_string())
@@ -459,16 +478,13 @@ async fn check_with_sink(
                 None => PushoverClient::from_config(&config).map_err(CommandError::invocation)?,
             };
             for message in pending {
-                let attempt_started = clock.now().to_string();
-                let outcome = pushover.send(&message).await;
+                let attempt = store
+                    .begin_notification_attempt(&message, &clock.now().to_string(), &report.run_id)
+                    .map_err(CommandError::state)?;
+                let outcome = pushover.send(&attempt.message).await;
                 let attempt_completed = clock.now().to_string();
                 let attempt_report = store
-                    .record_notification_attempt(
-                        &message,
-                        &attempt_started,
-                        &attempt_completed,
-                        &outcome,
-                    )
+                    .record_notification_attempt(&attempt, &attempt_completed, &outcome)
                     .map_err(CommandError::state)?;
                 if let Some(current) = report
                     .notifications
@@ -477,7 +493,7 @@ async fn check_with_sink(
                 {
                     *current = attempt_report.clone();
                 }
-                update_report_delivery_state(&mut report, &attempt_report);
+
                 if !matches!(outcome, NotificationAttemptOutcome::Delivered { .. }) {
                     notification_failed = true;
                     break;
@@ -490,48 +506,13 @@ async fn check_with_sink(
             code: 4,
             reason: exit_reason(4).to_owned(),
         };
-        store
-            .update_run_exit(&report.run_id, 4)
-            .map_err(CommandError::state)?;
     }
-    output_reports(std::slice::from_ref(&report), format).map_err(CommandError::invocation)?;
+    store
+        .refresh_run_delivery(&report.run_id)
+        .map_err(CommandError::state)?;
+    let persisted = store.load_reports(1, None).map_err(CommandError::state)?;
+    output_reports(&persisted, format).map_err(CommandError::invocation)?;
     Ok(report.exit.code)
-}
-
-fn update_report_delivery_state(
-    report: &mut RunReport,
-    notification: &sentinel_core::NotificationReport,
-) {
-    let state = match notification.status {
-        NotificationStatus::Delivered if notification.transition == TransitionKind::Alert => {
-            Some(AlertDeliveryState::Delivered)
-        }
-        NotificationStatus::Delivered => Some(AlertDeliveryState::Resolved),
-        NotificationStatus::Failed => Some(AlertDeliveryState::Failed),
-        NotificationStatus::Unknown => Some(AlertDeliveryState::Unknown),
-        NotificationStatus::Pending
-        | NotificationStatus::Suppressed
-        | NotificationStatus::Retryable
-        | NotificationStatus::Cancelled => None,
-    };
-    if let Some(state) = state {
-        for condition_id in &notification.condition_ids {
-            if let Some(evaluation) = report
-                .evaluations
-                .iter_mut()
-                .find(|evaluation| evaluation.id == *condition_id)
-            {
-                evaluation.notification_state = state;
-            }
-            if let Some(finding) = report
-                .findings
-                .iter_mut()
-                .find(|finding| finding.id == *condition_id)
-            {
-                finding.notification_state = state;
-            }
-        }
-    }
 }
 
 fn report(
@@ -539,7 +520,13 @@ fn report(
     format: OutputFormat,
     limit: usize,
     since: Option<&str>,
+    explain: bool,
 ) -> Result<u8, CommandError> {
+    if explain && format != OutputFormat::Human {
+        return Err(CommandError::invocation(anyhow!(
+            "--explain requires --format human; JSON already includes condition evidence"
+        )));
+    }
     if limit == 0 || limit > 10_000 {
         return Err(CommandError::invocation(anyhow!(
             "report limit must be between 1 and 10000"
@@ -564,12 +551,16 @@ fn report(
             "state contains no matching runs"
         )));
     }
-    output_reports(&reports, format).map_err(CommandError::invocation)?;
+    render::write_reports(&mut std::io::stdout().lock(), &reports, format, explain)
+        .map_err(CommandError::invocation)?;
     Ok(0)
 }
 
 fn migrate_state(state: &Path) -> Result<u8, CommandError> {
-    let store = StateStore::open(state).map_err(CommandError::state)?;
+    let (store, backup) = StateStore::migrate(state).map_err(CommandError::state)?;
+    if let Some(backup) = backup {
+        println!("pre-migration backup: {}", backup.display());
+    }
     println!(
         "state schema is current (version {})",
         store.schema_version()
@@ -578,9 +569,9 @@ fn migrate_state(state: &Path) -> Result<u8, CommandError> {
 }
 
 fn print_schema(kind: SchemaKind, version: u32) -> Result<u8, CommandError> {
-    if version != 1 {
+    if !matches!(kind, SchemaKind::State) && version != 1 {
         return Err(CommandError::invocation(anyhow!(
-            "only schema version 1 is available"
+            "configuration and report schemas are version 1"
         )));
     }
     match kind {
@@ -606,7 +597,10 @@ fn print_schema(kind: SchemaKind, version: u32) -> Result<u8, CommandError> {
                 serde_json::to_string_pretty(&schema).map_err(CommandError::invocation)?
             );
         }
-        SchemaKind::State => print!("{}", canonical_state_schema()),
+        SchemaKind::State => print!(
+            "{}",
+            canonical_state_schema(version).map_err(CommandError::invocation)?
+        ),
     }
     Ok(0)
 }
@@ -635,7 +629,7 @@ fn versioned_schema<T: serde::Serialize>(
     if include_state_version {
         properties.insert(
             "state_schema_version".to_owned(),
-            serde_json::json!({ "const": 1 }),
+            serde_json::json!({ "enum": [1, STATE_SCHEMA_VERSION] }),
         );
     }
     Ok(value)
@@ -698,79 +692,6 @@ fn baseline_profile<'config>(
         .condition_profiles
         .get(&target.condition_profile)
         .ok_or_else(|| anyhow!("behavioral target condition profile is missing"))
-}
-
-fn output_reports(reports: &[RunReport], format: OutputFormat) -> anyhow::Result<()> {
-    match format {
-        OutputFormat::Json => {
-            let report = reports
-                .first()
-                .ok_or_else(|| anyhow!("no report is available to render"))?;
-            println!("{}", serde_json::to_string_pretty(report)?);
-        }
-        OutputFormat::Jsonl => {
-            for report in reports {
-                println!("{}", serde_json::to_string(report)?);
-            }
-        }
-        OutputFormat::Human => {
-            for (index, report) in reports.iter().enumerate() {
-                if index > 0 {
-                    println!();
-                }
-                println!(
-                    "run={} completed={} status={:?} complete_targets={}/{} exit={}",
-                    report.run_id,
-                    report.completed_at,
-                    report.run_status,
-                    report.complete_targets,
-                    report.expected_targets,
-                    report.exit.code
-                );
-                for target in &report.targets {
-                    if let Some(observation) = &target.operational {
-                        println!(
-                            "{}: queries={} blocked={:.1}% processing={:.0}ms upstream_max={:.0}ms",
-                            target.name,
-                            observation.queries,
-                            observation.blocked_ratio * 100.0,
-                            observation.average_processing_seconds * 1_000.0,
-                            observation.maximum_upstream_seconds * 1_000.0
-                        );
-                    } else {
-                        println!(
-                            "{}: incomplete ({})",
-                            target.name,
-                            target.error_kind.as_deref().unwrap_or("unknown")
-                        );
-                    }
-                }
-                if let Some(aggregate) = &report.aggregate {
-                    println!(
-                        "behavioral baseline: {} (age={}s same_hour_samples={})",
-                        if aggregate.baseline_ready {
-                            "active"
-                        } else {
-                            "learning"
-                        },
-                        aggregate.baseline_age_seconds,
-                        aggregate.same_hour_samples
-                    );
-                }
-                for finding in &report.findings {
-                    println!(
-                        "finding [{:?}/{:?}] {}/{}: {}",
-                        finding.severity,
-                        finding.lifecycle,
-                        finding.kind,
-                        finding.reason,
-                        finding.summary
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 impl FailOn {
@@ -1998,7 +1919,10 @@ minimum_same_hour_samples = 36
             );
         }
         assert_eq!(value["schema_version"], serde_json::json!(1));
-        assert_eq!(value["state_schema_version"], serde_json::json!(1));
+        assert_eq!(
+            value["state_schema_version"],
+            serde_json::json!(sentinel_core::STATE_SCHEMA_VERSION)
+        );
         assert!(!persisted.findings.is_empty());
 
         let round_tripped: RunReport =
@@ -2018,21 +1942,33 @@ minimum_same_hour_samples = 36
             2
         );
         assert_eq!(
-            report(&state, OutputFormat::Human, 0, None)
+            report(&state, OutputFormat::Human, 0, None, false)
                 .expect_err("a zero limit is invalid")
                 .code,
             2
         );
         assert_eq!(
-            report(&state, OutputFormat::Json, 2, None)
+            report(&state, OutputFormat::Json, 1, None, true)
+                .expect_err("explain is human-only")
+                .code,
+            2
+        );
+        assert_eq!(
+            report(&state, OutputFormat::Json, 2, None, false)
                 .expect_err("json output requires a single report")
                 .code,
             2
         );
         assert_eq!(
-            report(&state, OutputFormat::Human, 1, Some("not-a-timestamp"))
-                .expect_err("an invalid since value is rejected")
-                .code,
+            report(
+                &state,
+                OutputFormat::Human,
+                1,
+                Some("not-a-timestamp"),
+                false
+            )
+            .expect_err("an invalid since value is rejected")
+            .code,
             2
         );
     }
@@ -2042,7 +1978,7 @@ minimum_same_hour_samples = 36
         let directory = tempdir().expect("tempdir");
         let state = directory.path().join("absent.sqlite");
 
-        let error = report(&state, OutputFormat::Human, 1, None)
+        let error = report(&state, OutputFormat::Human, 1, None, false)
             .expect_err("an absent state database must fail");
 
         assert_eq!(error.code, 5);

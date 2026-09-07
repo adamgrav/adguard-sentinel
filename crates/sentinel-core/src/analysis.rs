@@ -1086,6 +1086,10 @@ pub fn advance_condition(
     state.last_observed_at = Some(observed_at.to_owned());
     let transition = match evaluation.outcome {
         EvaluationOutcome::Active => {
+            if state.lifecycle == ConditionLifecycle::Clear {
+                state.episode_id = Some(run_id.to_owned());
+                state.alert_delivery_state = AlertDeliveryState::Never;
+            }
             state.consecutive_clear = 0;
             state.consecutive_active = state.consecutive_active.saturating_add(1);
             if state.first_observed_at.is_none() {
@@ -1137,9 +1141,6 @@ pub fn advance_condition(
                         summary: evaluation.summary.clone(),
                     })
                 } else {
-                    if !was_firing && state.alert_delivery_state == AlertDeliveryState::Pending {
-                        state.alert_delivery_state = AlertDeliveryState::Never;
-                    }
                     None
                 }
             } else {

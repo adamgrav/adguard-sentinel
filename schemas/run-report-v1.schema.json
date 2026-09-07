@@ -195,6 +195,38 @@
       ],
       "type": "object"
     },
+    "DeliveryAction": {
+      "enum": [
+        "attempt",
+        "recovered"
+      ],
+      "type": "string"
+    },
+    "DeliveryActivity": {
+      "additionalProperties": false,
+      "description": "Delivery work handled by this run, including messages from older runs.\nThe outcome is a snapshot; a later retry does not rewrite this activity.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/DeliveryAction"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "notification": {
+          "$ref": "#/$defs/NotificationReport"
+        },
+        "origin_run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "origin_run_id",
+        "action",
+        "notification"
+      ],
+      "type": "object"
+    },
     "DnsObservation": {
       "additionalProperties": false,
       "properties": {
@@ -397,6 +429,7 @@
     "NotificationStatus": {
       "enum": [
         "pending",
+        "in_flight",
         "suppressed",
         "delivered",
         "retryable",
@@ -681,6 +714,13 @@
     "config_sha256": {
       "type": "string"
     },
+    "delivery_activity": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DeliveryActivity"
+      },
+      "type": "array"
+    },
     "evaluations": {
       "items": {
         "$ref": "#/$defs/ConditionEvaluation"
@@ -731,7 +771,10 @@
       "type": "string"
     },
     "state_schema_version": {
-      "const": 1
+      "enum": [
+        1,
+        2
+      ]
     },
     "targets": {
       "items": {
