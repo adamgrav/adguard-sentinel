@@ -8,23 +8,24 @@ Commands below use a POSIX shell on Linux; `sudo` marks host-level installation.
 
 ### Nix
 
-Build from a checkout with `nix build`, or pin a released source:
+Build from the checkout containing the units and instructions you are using:
 
 ```sh
-nix build github:adamgrav/adguard-sentinel/v0.3.0
+nix build
 ./result/bin/adguard-sentinel --help
 ```
 
 For a persistent systemd installation, keep the output rooted:
 
 ```sh
-sudo nix build github:adamgrav/adguard-sentinel/v0.3.0 --out-link /opt/adguard-sentinel
+sudo nix build . --out-link /opt/adguard-sentinel
 /opt/adguard-sentinel/bin/adguard-sentinel --help
 ```
 
-Use `/opt/adguard-sentinel/bin/adguard-sentinel` for both binary paths in the
-unit below. An operator-owned NixOS configuration can reference the package
-directly instead; this repository exports no service module.
+Use `/opt/adguard-sentinel/bin/adguard-sentinel` for both binary paths through
+the override below. The package includes the canonical units under
+`share/adguard-sentinel/systemd`. An operator-owned NixOS configuration can
+reference the package directly; this repository exports no service module.
 
 ### Source or Cargo
 
@@ -39,10 +40,10 @@ cargo build --locked --release
 sudo install -Dm755 target/release/adguard-sentinel /usr/local/bin/adguard-sentinel
 ```
 
-Alternatively, install a tag into your Cargo bin directory:
+Alternatively, install from that checkout into your Cargo bin directory:
 
 ```sh
-cargo install --locked --git https://github.com/adamgrav/adguard-sentinel --tag v0.3.0 sentinel-cli
+cargo install --locked --path apps/sentinel-cli
 adguard-sentinel --help
 ```
 
@@ -145,72 +146,43 @@ notifications. Expect `configuration is valid`, a successful unit exit, and
 diagnostic. This check requires Linux/systemd and is not exercised by local
 macOS checks or the Rust suite.
 
-Create `/etc/systemd/system/adguard-sentinel.service` with mode `0644`:
+Install the [canonical service](../deploy/systemd/adguard-sentinel.service) and
+[timer](../deploy/systemd/adguard-sentinel.timer) from the same checkout as the
+binary:
+
+```sh
+sudo install -m644 deploy/systemd/adguard-sentinel.service /etc/systemd/system/
+sudo install -m644 deploy/systemd/adguard-sentinel.timer /etc/systemd/system/
+```
+
+For a rooted Nix package without a checkout, use
+`/opt/adguard-sentinel/share/adguard-sentinel/systemd/` as the source directory.
+The service uses `/usr/local/bin/adguard-sentinel` by default. For Nix, create
+`/etc/systemd/system/adguard-sentinel.service.d/binary.conf`:
 
 ```ini
-[Unit]
-Description=AdGuard Sentinel read-only resolver observation
-Documentation=https://github.com/adamgrav/adguard-sentinel
-After=network-online.target
-Wants=network-online.target
-
 [Service]
-Type=oneshot
-LoadCredential=config:/etc/adguard-sentinel/config.toml
-ExecStartPre=/usr/local/bin/adguard-sentinel validate-config --config %d/config
-ExecStart=/usr/local/bin/adguard-sentinel check --config %d/config
-DynamicUser=yes
-StateDirectory=adguard-sentinel
-StateDirectoryMode=0700
-UMask=0077
-TimeoutStartSec=120
-
-CapabilityBoundingSet=
-NoNewPrivileges=yes
-PrivateDevices=yes
-PrivateTmp=yes
-ProtectClock=yes
-ProtectControlGroups=yes
-ProtectHome=yes
-ProtectHostname=yes
-ProtectKernelLogs=yes
-ProtectKernelModules=yes
-ProtectKernelTunables=yes
-ProtectProc=invisible
-ProtectSystem=strict
-RestrictAddressFamilies=AF_INET AF_INET6
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
+ExecStartPre=
+ExecStartPre=/opt/adguard-sentinel/bin/adguard-sentinel validate-config --config %d/config
+ExecStart=
+ExecStart=/opt/adguard-sentinel/bin/adguard-sentinel check --config %d/config
 ```
 
-Add the credential lines needed by your configuration. The default state path
-matches `StateDirectory`, which supplies private writable storage. Leave
-`--fail-on` at `never`; ordinary findings should not fail the unit. Adjust
-`TimeoutStartSec` if your target count and timeouts require more than 120 seconds.
-
-Create `/etc/systemd/system/adguard-sentinel.timer` with mode `0644`:
-
-```ini
-[Unit]
-Description=Run AdGuard Sentinel every five minutes
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-AccuracySec=30s
-
-[Install]
-WantedBy=timers.target
-```
+Create the drop-in directory with mode `0755` and files with mode `0644`. Add
+any Basic or Pushover `LoadCredential` lines described above in a separate
+`credentials.conf` drop-in with a `[Service]` section. The default state path
+matches `StateDirectory`, which supplies private writable storage. The service
+uses a dynamic user, mode `0700` state storage, umask `0077`, a read-only system,
+restricted system calls and capabilities, and a 120-second start deadline.
+Leave `--fail-on` at `never`; ordinary findings should not fail the unit. Set
+`TimeoutStartSec` in a drop-in if your target count and request/notification
+timeouts require more than 120 seconds.
 
 This monotonic timer runs after boot and then relative to the previous
-activation. It does not replay checks missed while the host was off.
+activation. It does not replay checks missed while the host was off. Systemd
+does not start a second instance of an already active oneshot. A manual `check`
+against the same database is also refused while a writer holds it, with exit `5` and
+`state database is already in use`. Read-only `report` remains available.
 
 Validate the units, then start one observation before enabling the timer:
 
@@ -230,6 +202,44 @@ target with no unexpected findings. A successful oneshot normally becomes
 sudo systemctl enable --now adguard-sentinel.timer
 systemctl list-timers adguard-sentinel.timer --all
 ```
+
+## Automated synthetic acceptance
+
+The [acceptance harness](../tools/check-linux-deployment.py) creates a loopback
+mock with synthetic responses and temporary state. It accepts a binary path;
+there is no option for a real resolver or notification destination:
+
+```sh
+python3 tools/check-linux-deployment.py --binary target/debug/adguard-sentinel
+```
+
+This portable mode checks Basic authentication, all six allowlisted GETs,
+private state and repeated runs, malformed data, HTTP failure, request timeout,
+suppressed alert/recovery, and concurrent writer refusal while reports remain
+readable. It does not test systemd.
+
+On a **disposable Linux host with systemd**, run the complete service suite:
+
+```sh
+sudo python3 tools/check-linux-deployment.py --binary target/debug/adguard-sentinel --systemd --disposable
+```
+
+It copies the canonical units unchanged, then uses drop-ins for unique temporary
+paths, the test binary, synthetic credentials, and accelerated timing. It checks
+credential access under `DynamicUser`, read-only system mounts, effective
+capabilities, syscall/address-family restrictions, state permissions, a missing
+credential, validation of both Pushover credential files without delivery,
+process termination at the systemd deadline, restart after termination, and two
+recurring timer activations. It also migrates v1 state under the service user,
+checks private backup/lock ownership, and uses that state through the canonical
+service. Runtime units and isolated state are removed on exit. Do not run this
+root-level suite on a production monitor.
+
+[CI](../.github/workflows/ci.yml) runs this suite against both native Linux Nix
+packages and the source-built Ubuntu binary. A configured job is not a passing
+result: inspect CI for the exact commit. These synthetic checks do not establish
+real credentials, resolver reachability, five-minute scheduling, job-health
+integration, or Pushover delivery.
 
 ## Inspect and accept
 
@@ -259,6 +269,35 @@ stops Sentinel's timer, restores the previous monitor and job-health target, and
 verifies one successful run. For binary upgrades, read the changelog before
 assuming an older binary can read newly written state.
 
+## Upgrade state
+
+Read the changelog for the installed and target versions. A binary that requires
+a newer state schema refuses an older database until an explicit migration;
+`check` never performs that upgrade. Stop scheduling and wait for the active
+writer before copying or migrating state:
+
+```sh
+sudo systemctl stop adguard-sentinel.timer adguard-sentinel.service
+sudo cp -a /var/lib/adguard-sentinel/state.sqlite /var/lib/adguard-sentinel/state.sqlite.before-upgrade
+sudo systemd-run --unit=adguard-sentinel-migration --wait --pipe --collect \
+  --property=DynamicUser=yes --property=User=adguard-sentinel \
+  --property=StateDirectory=adguard-sentinel --property=StateDirectoryMode=0700 \
+  --property=UMask=0077 --property=PrivateNetwork=yes \
+  /usr/local/bin/adguard-sentinel migrate-state --state /var/lib/adguard-sentinel/state.sqlite
+sudo systemctl start adguard-sentinel.service
+sudo systemctl show adguard-sentinel.service -p Result -p ExecMainStatus
+```
+
+Use the new binary's path for migration, including the Nix path when applicable.
+The transient unit uses the canonical service's user and state directory, so the
+new lock and backup have the correct ownership. If the service overrides `User`
+or `StateDirectory`, use those values. Running migration directly as root can
+leave a root-owned lock that the dynamic service user cannot open.
+Keep the backup private. Accept the first run before restarting the timer. A
+failed migration must leave the original database usable; retain the backup
+until the rollback window ends. Binary rollback may also require restoring its
+matching state backup while the timer and service are stopped.
+
 ## Remove
 
 The following removes a source or Cargo installation, its configuration, and
@@ -268,6 +307,7 @@ all history and latches:
 sudo systemctl disable --now adguard-sentinel.timer
 sudo systemctl stop adguard-sentinel.service
 sudo rm /etc/systemd/system/adguard-sentinel.service /etc/systemd/system/adguard-sentinel.timer
+sudo rm -rf /etc/systemd/system/adguard-sentinel.service.d
 sudo systemctl daemon-reload
 sudo rm -rf /var/lib/adguard-sentinel /etc/adguard-sentinel
 sudo rm /usr/local/bin/adguard-sentinel

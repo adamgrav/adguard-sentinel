@@ -47,6 +47,11 @@ jobs:
       - name: Run aggregate development checks
         run: nix develop -c just check
 
+      - name: Accept the packaged service on disposable Linux
+        run: |
+          nix build
+          sudo python3 tools/check-linux-deployment.py --binary result/bin/adguard-sentinel --systemd --disposable
+
   source-build:
     name: Source build (Ubuntu, rustup)
     runs-on: ubuntu-24.04
@@ -81,6 +86,9 @@ jobs:
 
       - name: Build the release binary
         run: cargo build --locked --release
+
+      - name: Accept the source-built service on disposable Linux
+        run: sudo python3 tools/check-linux-deployment.py --binary target/release/adguard-sentinel --systemd --disposable
 
       - name: Confirm the release binary has no system SQLite, TLS, or tzdata dependency
         run: |

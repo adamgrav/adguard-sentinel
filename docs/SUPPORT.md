@@ -7,13 +7,14 @@
 | Linux `x86_64` | Deployment and development | Nix | Native Ubuntu CI build and full checks |
 | Linux `aarch64` | Deployment and development | Nix | Native Ubuntu ARM CI build and full checks |
 | Linux `x86_64` | Deployment and development | rustup source build | Ubuntu CI build, lint, and tests |
+| Linux `aarch64` | Deployment and development | rustup source build | Local Debian ARM build and synthetic systemd acceptance |
 | macOS `aarch64` | Development | Nix | Maintainer-recorded package builds and checks |
 
 [CI for 0.3.0's documentation commit](https://github.com/adamgrav/adguard-sentinel/actions/runs/33100163327)
 records all three Linux jobs. [ci.yml](../.github/workflows/ci.yml) runs them on
 pull requests and pushes to `main`; consult the result for the commit you use.
-macOS deployment and Windows are unsupported. ARM source builds outside Nix
-have no recorded verification.
+macOS deployment and Windows are unsupported. The local ARM source-build
+qualification is described below; it does not establish a release artifact.
 
 Builds use Rust `1.97.1`, edition 2024. Nix pins `nixpkgs` and the Rust overlay in
 `flake.lock`; source builds need a C compiler/linker for bundled SQLite. Only
@@ -47,7 +48,7 @@ static binary or enumerate every platform runtime library.
 
 A systemd timer is the supported recurring deployment. Manual validation,
 observation, and reporting are supported operator commands. Other schedulers
-have no documented deployment acceptance. The [example units](DEPLOYMENT.md#run-with-systemd)
+have no documented deployment acceptance. The [shipped units](../deploy/systemd/)
 require systemd credential support and must be validated on the target host.
 
 Pushover is the only notification provider. Notifications default to disabled;
@@ -65,6 +66,20 @@ JSON/JSONL reports and exit codes are available for operator-owned integrations.
   belongs to the operator; see [ADR 0009](decisions/0009-nix-package-boundary.md).
 
 ## Deployment evidence
+
+The current CI workflow runs the [Linux acceptance harness](../tools/check-linux-deployment.py)
+against the packaged and source-built binaries on disposable native runners.
+It covers synthetic resolver failures and actual systemd credentials, state
+permissions, hardening, timeout/restart, overlap, and timer activation. The
+historical CI result above predates that harness; inspect results for the commit
+being deployed before treating these service checks as passed.
+
+Local qualification on 2026-09-08 passed the complete suite with a native ARM64
+Rust `1.97.1` source build under Debian 13 and systemd `257.13`, in an isolated
+container. The canonical units retained their hardening; test drop-ins changed
+paths and timing. Acceptance also covered migration as the dynamic service user,
+private backup/lock ownership, and subsequent service use of the upgraded state.
+This record does not establish the new native Ubuntu CI results for this branch.
 
 CI does not verify the operator's resolver version, credentials, network path,
 timer, job-health integration, or real notification delivery. Establish those

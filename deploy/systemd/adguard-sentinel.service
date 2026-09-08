@@ -1,0 +1,39 @@
+[Unit]
+Description=AdGuard Sentinel read-only resolver observation
+Documentation=https://github.com/adamgrav/adguard-sentinel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+LoadCredential=config:/etc/adguard-sentinel/config.toml
+ExecStartPre=/usr/local/bin/adguard-sentinel validate-config --config %d/config
+ExecStart=/usr/local/bin/adguard-sentinel check --config %d/config
+DynamicUser=yes
+StateDirectory=adguard-sentinel
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=120
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
