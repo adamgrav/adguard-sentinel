@@ -5,7 +5,7 @@ Generate the current formats with:
 ```sh
 adguard-sentinel print-schema config --version 1
 adguard-sentinel print-schema run-report --version 1
-adguard-sentinel print-schema state --version 1
+adguard-sentinel print-schema state --version 2
 ```
 
 The checked-in [schemas](../schemas/) come from the Rust types and canonical SQL.
@@ -47,9 +47,12 @@ paths inside and outside systemd.
 ## Run report v1
 
 JSON contains normalized observations, condition evaluations, findings,
-transitions, delivery status, and execution health. JSONL emits one complete
+transitions, delivery activity, and execution health. JSONL emits one complete
 report object per line. `--format json` accepts a single report; use JSONL for
 multiple historical reports.
+
+Counts remain JSON integers across the full `u64` range. Consumers must preserve
+integer precision when parsing them.
 
 Reports exclude credentials and client/query identities, but retain resolver
 names, upstreams, filter URLs, rewrite tuples, counters, and policy evidence.
@@ -97,11 +100,31 @@ From 0.3.0, `same_hour_samples` counts valid rate windows and `baseline_ready`
 indicates rate-population readiness. Neither establishes ratio readiness; use
 the individual outcomes and reasons described in [BEHAVIOR](BEHAVIOR.md).
 
+### Delivery records
+
+`notifications[]` belongs to transitions originating in that run. Its statuses
+can change after later delivery attempts. `transitions[]` retains the original
+condition membership and summaries.
+
+`delivery_activity[]` records attempts and interrupted-attempt recovery performed
+by the run being reported, including work originating in older runs. Each entry
+has an `attempt_id`, `origin_run_id`, `action` (`attempt` or `recovered`), and a
+`notification` snapshot containing the original notification ID, condition IDs,
+status, and error class. These snapshots preserve the executing run's result
+even if an origin-owned notification later changes status. Inspect them when
+exit `4` accompanies no new transitions.
+
 ### Historical reports
 
 Reports preserve stored evaluations instead of recomputing past findings.
 Evaluations from 0.1.0 supply `reason = "unrecorded"` when read, and their older
 counter names deserialize into the current names.
+
+Older exports without `delivery_activity` read as an empty array. Delivery
+fields can reflect later attempts or conservative migration decisions; stored
+observation outcomes are not re-evaluated. `state_schema_version` identifies the
+database schema used to read the report, so migrated history reports version
+`2`; it does not identify the original producer.
 
 Before 0.3.0, aggregate readiness fields counted raw readings. Those historical
 values retain that meaning; they are not recalculated as windows. The current
@@ -110,9 +133,17 @@ reports. Report version 1 alone therefore does not identify the producer's
 pre-1.0 semantics. Keep the producing release alongside exports when comparing
 history across upgrades.
 
-## SQLite v1
+## SQLite v2
 
-[schemas/state-v1.sql](../schemas/state-v1.sql) defines private state.
-`PRAGMA user_version` and the checksummed migration row identify schema v1.
-`check` creates new v1 state and refuses unsupported existing versions.
-[MIGRATION](MIGRATION.md) describes explicit migration and backup requirements.
+[schemas/state-v2.sql](../schemas/state-v2.sql) defines current private state.
+`PRAGMA user_version` and checksummed migration rows identify its version.
+The released [v1 schema](../schemas/state-v1.sql) remains frozen and available
+through `print-schema state --version 1`.
+
+V2 stores unsigned counters as validated decimal text, avoiding SQLite's signed
+integer limit. Live/dry-run identity persists independently of retained runs.
+Delivery attempts, original batch membership, and episode identity support
+recovery without silently replaying possibly transmitted messages.
+
+`check` creates new v2 state. Both `check` and `report` refuse v1 until an
+explicit [migration](MIGRATION.md), including its pre-upgrade backup, succeeds.

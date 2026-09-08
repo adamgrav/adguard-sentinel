@@ -4,6 +4,37 @@ Diagnostics go to stderr; reports go to stdout. `RUST_LOG=debug` enables more
 logging. Keep reports and debug logs private: they can contain resolver names,
 URLs, counters, and policy evidence.
 
+## Inspect a recorded run
+
+```sh
+adguard-sentinel report --state state.sqlite3 --limit 1
+adguard-sentinel report --state state.sqlite3 --limit 1 --explain
+```
+
+Use the service's state path and an identity allowed to read it. Reporting is
+read-only and makes no network requests. The concise view shows target status,
+separate rate and ratio baseline readiness, findings, and notification outcomes.
+`ready` means a baseline is trained, not that its condition is clear. A trained
+baseline can still have an unavailable or too-small current window. A missing
+evaluation supplies no readiness claim.
+
+Delivery lines include the attempt and origin-run IDs for work handled by this
+run. They can explain exit `4` even when no notification originated here.
+JSON exposes the same snapshots in `delivery_activity[]`; see
+[delivery records](SCHEMAS.md#delivery-records).
+
+`--explain` adds every recorded condition's outcome and reason, expected and
+observed evidence, sustain/recovery counts, and notification latch. For learning
+conditions, the evidence includes population counts and gates; evaluated
+conditions include their measurements and thresholds. Not-evaluated conditions
+hold their counters. This view reports stored evidence; it does not recalculate
+old runs using the current configuration.
+
+`--explain` requires human output. For automation, use `--format json --limit 1`
+or `--format jsonl`; both already contain the condition evidence. An empty
+notification/activity list does not establish that the outbox has no older
+pending or quarantined message.
+
 ## Exit codes
 
 | Code | Meaning | Action |
@@ -69,7 +100,9 @@ recorded rejection. Retain the database to preserve history and latches.
 | --- | --- |
 | `state parent directory does not exist` | Create the directory, or use the service's `StateDirectory` |
 | `cannot open or use state database` | Check ownership and writable paths; use the service identity or privileged reporting for private state |
-| `state schema version N is unsupported; expected 1` | Check [MIGRATION](MIGRATION.md); the current binary cannot convert another schema |
+| `state schema v1 requires explicit migration` | Stop writers and follow [MIGRATION](MIGRATION.md) |
+| `state schema version N is unsupported; expected 2` | Check the binary and state versions; only v1-to-v2 migration is supported |
+| `state database is already in use` | Wait for the existing check or migration to finish; overlapping checks fail before resolver requests |
 | `unversioned nonempty SQLite state is not supported` | Select a dedicated Sentinel database |
 | Database bound to a different run mode | Give live and dry-run observations separate databases |
 | `wall clock regressed behind the latest completed run` | Correct the clock and retry; the rejected run was not recorded |
@@ -77,6 +110,15 @@ recorded rejection. Retain the database to preserve history and latches.
 A database is bound to live or dry-run use after its first run. Dry-run still
 writes observations and advances its own latches. Discarding a database loses
 all history, latches, and learned baselines; it is not a routine repair step.
+
+The adjacent `.lock` file remains after a process exits; its existence does not
+mean ownership is held. Do not unlink it to bypass contention. A killed process
+releases ownership automatically, and reports can read committed state while
+a writer is running. Hard-linked databases are unsupported.
+
+Unresolved deliveries can retain evidence beyond `retention_days`; see
+[retention rules](BEHAVIOR.md#latches-time-and-retention). Migration creates a
+separate private backup, so include both state and backups when assessing disk use.
 
 ## Notifications
 
@@ -95,6 +137,7 @@ alert from that episode.
 
 | Status | Handling |
 | --- | --- |
+| `in_flight` | A durable attempt has started but has no committed result; if its process ends, the next check quarantines it as `unknown` |
 | `retryable` | A connection failure or Pushover 5xx remains queued for a later run after backoff |
 | `unknown` | Possible delivery, such as a timeout, interrupted response, or malformed success response; quarantined without automatic resend |
 | `failed` | Permanent rejection; check the configured application token and user key |
@@ -102,6 +145,11 @@ alert from that episode.
 For `unknown`, inspect the Pushover app to determine whether it arrived. There is
 no automatic retry or reconciliation command. A later run can exit zero while
 an earlier unknown entry remains quarantined.
+
+An interrupted-send recovery is recorded in the new run's delivery activity.
+Reading reports does not perform recovery. If migration produced
+`legacy_delivery_unconfirmed`, v1 could not prove safe replay or complete
+delivered membership; [MIGRATION](MIGRATION.md) explains the retained evidence.
 
 Pushover credential values are loaded when a message is pending. Configuration
 validation only checks file metadata, so it cannot establish that a token will

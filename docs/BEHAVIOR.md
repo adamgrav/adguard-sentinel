@@ -89,19 +89,46 @@ records the design rationale.
 - Removing a policy declaration or the behavioral section retains existing
   latches. Restoring the same condition ID resumes that state. Withdrawal is
   not observed recovery and emits no resolution.
-- Stored timestamps are UTC. A regressed wall clock does not advance or prune
-  state. Repeated DST hours share a wall-hour bucket; skipped hours have none.
+- Stored timestamps use UTC with nine fractional digits so text ordering matches
+  time ordering. Observation-time regression prevents that run's state commit.
+  Delivery also rejects regressed attempt/result times; an already-started
+  unconfirmed attempt remains available for interrupted-attempt recovery.
+  Repeated DST hours share a wall-hour bucket; skipped hours have none.
 - Retention includes samples at the cutoff. Only complete target observations
   become target samples; aggregate rows require a complete group.
+- Normal pruning retains origin runs with pending, in-flight, retryable, unknown,
+  or failed deliveries, including their observations, membership, and attempts.
+  This evidence can grow beyond the configured retention window; that setting
+  is not a hard database size bound.
+- Pruning also retains each target's latest ambiguous legacy counter observation.
+  Widening retention later cannot reconnect older delivery evidence across that
+  known loss of precision.
 
 ## Notifications
 
-Transitions are grouped into alert and resolution batches, with summaries only;
-structured evidence stays in reports and state. Pending delivery is ordered by
-creation time, with alerts before resolutions at the same time. Message ID
-breaks remaining ties.
+Transitions are sorted by condition ID within alert and resolution batches.
+Each payload contains complete summary lines and at most 1024 Unicode characters.
+An individually oversized line ends with `[truncated; see report]`; its complete
+summary stays local. Splitting batches never silently drops a condition.
+Pending delivery is ordered by creation time, with alerts before resolutions
+at the same time.
 
-An ambiguous attempt is quarantined and never resent automatically. A real
-resolution is eligible only after confirmed alert delivery. Dry-run and disabled
-notifications record suppressed transitions, including simulated resolutions,
-without loading notification credentials. See [ADR 0006](decisions/0006-pushover-delivery-ambiguity.md).
+Original batch membership, summaries, and attempt evidence are immutable.
+If one member recovers before a pending alert is delivered, the original batch
+is cancelled and any surviving members receive a replacement with their saved
+summaries and retry time. A new active episode cancels pending/retryable
+resolutions from the previous episode immediately, before its new sustain
+threshold. Late results cannot change a newer episode's delivery state.
+
+Before sending, Sentinel durably records an `in_flight` attempt. Its result,
+outbox status, and eligible episode delivery state commit together. If the
+process ends without that result, the next check marks the attempt `unknown`
+without resending. `report` never performs this recovery or starts a send.
+Other ambiguous outcomes are also quarantined without automatic replay.
+
+A real resolution requires confirmed alert delivery for that condition's
+current episode. Dry-run and disabled notifications record suppressed
+transitions, including simulated resolutions, without loading notification
+credentials. [SCHEMAS](SCHEMAS.md#delivery-records) distinguishes origin-owned
+notifications from each run's delivery activity;
+[ADR 0006](decisions/0006-pushover-delivery-ambiguity.md) records the rationale.

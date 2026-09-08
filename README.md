@@ -18,17 +18,17 @@ only the declared behaviour group aggregates observations.
 
 ## Install
 
-With Nix:
+Build from the checkout containing these instructions. With Nix:
 
 ```sh
-nix build github:adamgrav/adguard-sentinel
+nix build
 ./result/bin/adguard-sentinel --help
 ```
 
-From a tagged Git release, with Rust 1.97.1 and a C compiler:
+With Rust 1.97.1 and a C compiler:
 
 ```sh
-cargo install --locked --git https://github.com/adamgrav/adguard-sentinel --tag v0.3.0 sentinel-cli
+cargo install --locked --path apps/sentinel-cli
 adguard-sentinel --help
 ```
 
@@ -89,9 +89,15 @@ supply remain required. [SCHEMAS](docs/SCHEMAS.md) explains the exceptions.
 
 [DEPLOYMENT](docs/DEPLOYMENT.md) covers credentials, notifications, a five-minute
 systemd timer, acceptance, and removal. Reports are human-readable by default;
-`--format json` and `--format jsonl` provide the automation interface. Report
+`report --explain` adds per-condition measurements, thresholds, learning gates,
+and sustain/recovery progress. Delivery activity identifies retries and recovered
+attempts from earlier runs. `--format json` and `--format jsonl` provide the automation interface. Report
 compatibility is flexible before 1.0; consult [RELEASING](RELEASING.md) and the
 [CHANGELOG](CHANGELOG.md) when upgrading.
+
+The current checkout uses SQLite v2. Existing v1 state requires explicit
+`migrate-state`; [MIGRATION](docs/MIGRATION.md) describes the automatic private
+backup, conservative treatment of old delivery records, and rollback.
 
 ## Documentation
 
@@ -113,7 +119,7 @@ compatibility is flexible before 1.0; consult [RELEASING](RELEASING.md) and the
 nix develop -c just check
 ```
 
-This runs formatting, Clippy, tests, build, schema drift, and supply-chain
+This runs formatting, Clippy, tests, build, schema drift, documentation, and supply-chain
 checks. The suite uses synthetic fixtures and local mock servers; it contacts
 no live AdGuard Home or Pushover service. Dependency fetching and the RustSec
 advisory refresh require network access. See [CONTRIBUTING](CONTRIBUTING.md)

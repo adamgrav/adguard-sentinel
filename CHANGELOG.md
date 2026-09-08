@@ -5,6 +5,21 @@ Notable changes to AdGuard Sentinel. The format follows
 
 ## Unreleased
 
+### Added
+
+- Exclusive database ownership throughout each check, including observation and
+  delivery. Concurrent read-only reports remain available; competing writers
+  exit with a state error before observing targets.
+- Durable notification attempts recorded before transmission. Restarted checks
+  quarantine unfinished sends as unknown instead of risking duplicate delivery.
+- Per-run `delivery_activity` snapshots identify attempts and recoveries of
+  messages originating in older runs, independently of observation health.
+- `report --explain` with per-target/group measurements, learning gates,
+  thresholds, sustain/recovery progress, and notification outcomes.
+- Canonical systemd service/timer assets, included in the Nix package, and a
+  disposable Linux acceptance harness wired into native CI. Permanent
+  documentation-example and recursive JSON Schema contract checks join the suite.
+
 ### Fixed
 
 - Enabling notifications after a suppressed alert no longer sends a resolution
@@ -14,6 +29,17 @@ Notable changes to AdGuard Sentinel. The format follows
   resolutions, independent of their generated IDs. Older queued work stays first.
 - Installation instructions select the Cargo package `sentinel-cli` and load
   private systemd configuration through credentials for the dynamic service user.
+- Notification batches include only conditions represented in their actual
+  payload. Long batches split at complete lines; a single oversized summary is
+  explicitly abbreviated. Partial recovery preserves original payload/history
+  and the remaining members' retry delay.
+- Delivery results apply only to their condition episode. Recurrence cancels an
+  older pending resolution before the new condition reaches its sustain limit.
+- Unsigned counters retain their full range in persisted reports. UTC timestamp
+  ordering handles fractions and offsets, and clock regression is checked before
+  observation commits and delivery starts/results.
+- State initialization, mode binding, migration, and delivery-result updates are
+  transactional. Failed run commits leave the caller's report unchanged.
 
 ### Changed
 
@@ -21,8 +47,23 @@ Notable changes to AdGuard Sentinel. The format follows
   support, test-coverage, and privacy guidance.
 - Consolidated documentation and recorded the intentional pre-1.0 compatibility
   policy and documentation editing standard.
+- Ordinary retention preserves pending, retryable, in-flight, unknown, and failed
+  notification evidence. Unresolved delivery history can exceed the configured
+  retention window. Each target's latest legacy precision barrier is also kept,
+  preventing older retained readings from reconnecting across a counter reset.
 
-Configuration, report, and SQLite schemas are unchanged. No migration is needed.
+### Upgrade
+
+SQLite advances to v2. Run `migrate-state` explicitly before using v1 state;
+the command creates a private, verified v1 backup before the transactional
+upgrade. Legacy pending/retryable sends and delivery records without complete
+payload/acknowledgment evidence become unknown and are not replayed. Legacy
+saturated counters remain visible in history but restart the affected target's
+learning after its latest ambiguous sample. See [MIGRATION](docs/MIGRATION.md).
+
+Configuration and run-report schema versions remain 1. The report adds
+`delivery_activity`, an `in_flight` notification status, and reports the current
+state version separately. No release version or tag has been assigned yet.
 
 ## 0.3.0 — 2026-08-27
 

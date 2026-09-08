@@ -25,7 +25,12 @@ against `deny.toml` and known RustSec advisories.
 | url | target URL validation | runtime | MIT OR Apache-2.0 |
 | uuid | opaque run and outbox identifiers | runtime | Apache-2.0 OR MIT |
 | httpmock | local HTTP test servers | test | MIT |
+| jsonschema | recursive validation of produced reports against the public schema | test | MIT |
 | tempfile | isolated test configuration and state | test | MIT OR Apache-2.0 |
+
+The report contract tests disable `jsonschema`'s default HTTP/file resolvers and
+use its offline validator. Schema references cannot fetch network or local files.
+The validator is a development dependency and is absent from the shipped binary.
 
 Nix supplies the compiler and check tools. SQLite is bundled through rusqlite;
 Jiff embeds the IANA database. Review the tzdb release when updating Jiff.
@@ -43,7 +48,7 @@ just to silence them.
 | Crate | Versions | Reason |
 | --- | --- | --- |
 | base64 | 0.22, 0.23 | The direct declaration is 0.23; `reqwest` reaches 0.22 through `hyper-util`, and `httpmock` through `headers` |
-| getrandom | 0.2, 0.4 | Two generations of the randomness API are pulled in by separate dependents |
-| hashbrown | 0.15, 0.17 | Interior map dependency of crates that upgraded on different schedules |
+| getrandom | 0.2, 0.3, 0.4 | Runtime dependents use 0.2 and 0.4; the test-only schema validator adds 0.3 |
+| hashbrown | 0.16, 0.17 | Interior map dependency of crates that upgraded on different schedules |
 | syn | 2, 3 | Proc-macro dependency; build-time only, absent from the binary |
 | windows-sys | 0.52, 0.61 | Platform bindings; not reached in the Linux or macOS builds this project targets |

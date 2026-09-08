@@ -12,8 +12,9 @@ change in the changelog and update generated schemas when types change; do not
 introduce report versions solely to enforce a compatibility promise that begins
 at 1.0.
 
-The 0.3.0 report changes follow this policy. Existing SQLite v1 databases remain
-readable. Historical report interpretation is documented in
+The current report changes follow this policy. Existing SQLite v1 databases
+require explicit migration to v2 before this checkout can read them. Historical
+report interpretation is documented in
 [SCHEMAS](docs/SCHEMAS.md#historical-reports).
 
 At 1.0, report compatibility becomes a commitment: additive changes may retain
@@ -31,7 +32,8 @@ The operator's explicit untested-range override is not a support claim.
 ## Release checklist
 
 1. Finish and date the changelog entry for the planned release. Update any
-   configuration, behavior, schema, or support documentation affected.
+   configuration, behavior, schema, or support documentation affected. For the
+   current v2 state change, review migration and rollback acceptance.
 2. Set the release version in the workspace, internal crate requirements, and
    `flake.nix`, and update the pinned installation examples. Regenerate
    `Cargo.lock` with Cargo; do not edit it by hand.
