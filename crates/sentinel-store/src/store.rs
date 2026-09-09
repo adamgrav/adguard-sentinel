@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,19 +5,21 @@ use jiff::Timestamp;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use sentinel_core::{
     AggregateObservation, AlertDeliveryState, ConditionEvaluation, ConditionLifecycle,
-    ConditionState, ConditionTransition, Config, DnsObservation, ExitReport, FilterObservation,
-    Finding, NotificationReport, NotificationStatus, OperationalObservation, OutboxMessage,
-    RewriteObservation, RunHealth, RunReport, TargetReport, TargetRuntimeState, TargetSample,
-    TargetStatus, TransitionKind, UpstreamObservation, advance_condition,
+    ConditionState, ConditionTransition, Config, DeliveryAction, DeliveryActivity, DnsObservation,
+    ExitReport, FilterObservation, Finding, NotificationReport, NotificationStatus,
+    OperationalObservation, OutboxMessage, RewriteObservation, RunHealth, RunReport, TargetReport,
+    TargetRuntimeState, TargetSample, TargetStatus, TransitionKind, UpstreamObservation,
+    advance_condition,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-const SCHEMA: &str = include_str!("../../../schemas/state-v1.sql");
-const STATE_VERSION: i64 = 1;
+#[path = "schema.rs"]
+mod schema;
+
+const STATE_VERSION: i64 = schema::VERSION;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -26,10 +27,16 @@ pub enum StoreError {
     MissingParent(PathBuf),
     #[error("state parent directory does not exist: {0}")]
     ParentMissing(PathBuf),
+    #[error("state database is already in use: {0}")]
+    AlreadyInUse(PathBuf),
     #[error("cannot open or use state database")]
     Sqlite(#[from] rusqlite::Error),
     #[error("state schema version {observed} is unsupported; expected {expected}")]
     UnsupportedVersion { observed: i64, expected: i64 },
+    #[error(
+        "state schema v1 requires explicit migration; run migrate-state before check or report"
+    )]
+    MigrationRequired,
     #[error("unversioned nonempty SQLite state is not supported")]
     UnversionedState,
     #[error("cannot update state file permissions: {0}")]
@@ -61,13 +68,30 @@ pub enum NotificationAttemptOutcome {
 }
 
 #[derive(Debug)]
+pub struct NotificationAttempt {
+    pub message: OutboxMessage,
+    id: String,
+    started_at: String,
+    executing_run_id: String,
+}
+
+#[derive(Debug)]
 pub struct StateStore {
     pub(crate) connection: Connection,
     path: PathBuf,
+    // Declared after the connection so SQLite closes before ownership is released.
+    _ownership: Option<fs::File>,
 }
 
-pub fn canonical_state_schema() -> &'static str {
-    SCHEMA
+pub fn canonical_state_schema(version: u32) -> Result<String, StoreError> {
+    match version {
+        1 => Ok(schema::V1.to_owned()),
+        2 => Ok(schema::current_sql()),
+        version => Err(StoreError::UnsupportedVersion {
+            observed: i64::from(version),
+            expected: STATE_VERSION,
+        }),
+    }
 }
 
 impl StateStore {
@@ -85,52 +109,72 @@ impl StateStore {
         Ok(Self {
             connection,
             path: path.to_path_buf(),
+            _ownership: None,
         })
     }
 
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        Self::open_owned(path, false).map(|(store, _)| store)
+    }
+
+    /// Explicitly upgrades released v1 state after creating a private backup.
+    pub fn migrate(path: &Path) -> Result<(Self, Option<PathBuf>), StoreError> {
+        Self::open_owned(path, true)
+    }
+
+    fn open_owned(
+        path: &Path,
+        allow_migration: bool,
+    ) -> Result<(Self, Option<PathBuf>), StoreError> {
         let parent = path
             .parent()
             .ok_or_else(|| StoreError::MissingParent(path.to_path_buf()))?;
         if !parent.exists() {
             return Err(StoreError::ParentMissing(parent.to_path_buf()));
         }
-        let existed = path.exists();
-        let connection = Connection::open(path)?;
+        let ownership = acquire_ownership(path)?;
+        let mut connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL; PRAGMA trusted_schema = OFF;",
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version == 0 {
-            let table_count: i64 = connection.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
-                [],
-                |row| row.get(0),
-            )?;
-            if table_count != 0 {
-                return Err(StoreError::UnversionedState);
+        let mut backup = None;
+        match version {
+            0 => {
+                let table_count: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                    [], |row| row.get(0),
+                )?;
+                if table_count != 0 {
+                    return Err(StoreError::UnversionedState);
+                }
+                schema::initialize(&mut connection)?;
             }
-            connection.execute_batch(SCHEMA)?;
-            let applied_at = Timestamp::now().to_string();
-            connection.execute(
-                "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?1, ?2, ?3, ?4)",
-                params![STATE_VERSION, "initial", schema_checksum(), applied_at],
-            )?;
-        } else if version != STATE_VERSION {
-            return Err(StoreError::UnsupportedVersion {
-                observed: version,
-                expected: STATE_VERSION,
-            });
+            1 if allow_migration => {
+                schema::validate(&connection, 1)?;
+                backup = Some(backup_version_one(&connection, path)?);
+                schema::migrate(&mut connection)?;
+            }
+            1 => return Err(StoreError::MigrationRequired),
+            STATE_VERSION => {}
+            observed => {
+                return Err(StoreError::UnsupportedVersion {
+                    observed,
+                    expected: STATE_VERSION,
+                });
+            }
         }
         validate_schema(&connection)?;
-        if !existed {
-            set_private_permissions(path)?;
-        }
-        Ok(Self {
-            connection,
-            path: path.to_path_buf(),
-        })
+        set_private_permissions(path)?;
+        Ok((
+            Self {
+                connection,
+                path: path.to_path_buf(),
+                _ownership: Some(ownership),
+            },
+            backup,
+        ))
     }
 
     pub fn path(&self) -> &Path {
@@ -146,7 +190,7 @@ impl StateStore {
         let existing: Option<String> = self
             .connection
             .query_row(
-                "SELECT mode FROM runs WHERE mode IN ('live', 'dry_run') LIMIT 1",
+                "SELECT run_mode FROM state_identity WHERE singleton = 1",
                 [],
                 |row| row.get(0),
             )
@@ -165,23 +209,37 @@ impl StateStore {
     /// Only complete observations are returned: an incomplete one has no
     /// counter to difference against, and treating a missing reading as a
     /// value would invent traffic that was never observed.
+    /// Ambiguous migrated counts restart that target's learning history. Only
+    /// readings after its latest inexact observation are returned, preventing
+    /// either target or group windows from bridging an unknown counter reset.
     pub fn load_target_samples(
         &self,
         cutoff_unix_seconds: i64,
     ) -> Result<Vec<TargetSample>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT r.completed_at, t.run_id, t.target_id, t.queries, t.blocked
+            "WITH latest_barriers AS MATERIALIZED (
+               SELECT t.target_id, r.completed_at, r.rowid AS run_order,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY t.target_id ORDER BY r.completed_at DESC, r.rowid DESC
+                      ) AS newest
+               FROM target_observations t JOIN runs r ON r.id = t.run_id
+               WHERE t.counters_exact = 0
+             )
+             SELECT r.completed_at, t.run_id, t.target_id, t.queries, t.blocked
              FROM target_observations t
              JOIN runs r ON r.id = t.run_id
-             WHERE t.complete = 1 AND t.queries IS NOT NULL AND t.blocked IS NOT NULL
-             ORDER BY r.completed_at ASC",
+             LEFT JOIN latest_barriers barrier ON barrier.target_id = t.target_id AND barrier.newest = 1
+             WHERE t.complete = 1 AND t.counters_exact = 1 AND t.queries IS NOT NULL AND t.blocked IS NOT NULL
+               AND (barrier.target_id IS NULL OR r.completed_at > barrier.completed_at
+                    OR (r.completed_at = barrier.completed_at AND r.rowid > barrier.run_order))
+             ORDER BY r.completed_at ASC, r.rowid ASC, t.target_id ASC",
         )?;
         let rows = statement.query_map([], |row| {
             let timestamp: String = row.get(0)?;
             let run_id: String = row.get(1)?;
             let target_id: String = row.get(2)?;
-            let queries: i64 = row.get(3)?;
-            let blocked: i64 = row.get(4)?;
+            let queries: String = row.get(3)?;
+            let blocked: String = row.get(4)?;
             Ok((timestamp, run_id, target_id, queries, blocked))
         })?;
         let mut samples = Vec::new();
@@ -195,12 +253,8 @@ impl StateStore {
                 run_id,
                 target_id,
                 timestamp,
-                queries: u64::try_from(queries).map_err(|_| {
-                    StoreError::InvalidData("target query count is negative".to_owned())
-                })?,
-                blocked: u64::try_from(blocked).map_err(|_| {
-                    StoreError::InvalidData("target blocked count is negative".to_owned())
-                })?,
+                queries: parse_counter(&queries, "query count")?,
+                blocked: parse_counter(&blocked, "blocked count")?,
             });
         }
         Ok(samples)
@@ -226,11 +280,17 @@ impl StateStore {
             .map_err(StoreError::from)
     }
 
-    pub fn latest_completed_unix_seconds(&self) -> Result<Option<i64>, StoreError> {
+    pub fn latest_completed_at(&self) -> Result<Option<Timestamp>, StoreError> {
         let latest: Option<String> =
             self.connection
                 .query_row("SELECT MAX(completed_at) FROM runs", [], |row| row.get(0))?;
-        latest.map(|value| parse_timestamp(&value)).transpose()
+        latest
+            .map(|value| {
+                value
+                    .parse::<Timestamp>()
+                    .map_err(|error| StoreError::InvalidData(error.to_string()))
+            })
+            .transpose()
     }
 
     pub fn commit_run(
@@ -241,25 +301,58 @@ impl StateStore {
         retention_cutoff: &str,
         suppress_notifications: bool,
     ) -> Result<Vec<OutboxMessage>, StoreError> {
+        let mut candidate = report.clone();
+        candidate.started_at = canonical_timestamp(&candidate.started_at)?;
+        candidate.completed_at = canonical_timestamp(&candidate.completed_at)?;
+        candidate.state_schema_version = self.schema_version();
+        if candidate.completed_at < candidate.started_at {
+            return Err(StoreError::InvalidData(
+                "wall clock regressed during observation; state was not advanced".to_owned(),
+            ));
+        }
+        if let Some(latest) = self.latest_completed_at()? {
+            let started = candidate
+                .started_at
+                .parse::<Timestamp>()
+                .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+            if started < latest {
+                return Err(StoreError::InvalidData(
+                    "wall clock regressed behind the latest completed run; state was not advanced"
+                        .to_owned(),
+                ));
+            }
+        }
+        self.ensure_run_mode(candidate.mode)?;
         let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO state_identity(singleton, run_mode) VALUES (1, ?1)",
+            [encode(candidate.mode)?],
+        )?;
         let mut transitions = Vec::new();
         let mut states = Vec::new();
-        for evaluation in &mut report.evaluations {
+        for evaluation in &mut candidate.evaluations {
             let mut state = load_condition_state(&transaction, evaluation)?
                 .unwrap_or_else(|| ConditionState::from_evaluation(evaluation));
             let previous_delivery = state.alert_delivery_state;
+            let previous_lifecycle = state.lifecycle;
+            if evaluation.outcome == sentinel_core::EvaluationOutcome::Active
+                && previous_lifecycle == ConditionLifecycle::Clear
+            {
+                cancel_unsent_condition(&transaction, &evaluation.id, None)?;
+            }
             let transition = advance_condition(
                 &mut state,
                 evaluation,
-                &report.completed_at,
-                &report.run_id,
+                &candidate.completed_at,
+                &candidate.run_id,
                 suppress_notifications,
             );
             if evaluation.outcome == sentinel_core::EvaluationOutcome::Clear
                 && state.lifecycle == ConditionLifecycle::Clear
+                && previous_lifecycle != ConditionLifecycle::Clear
                 && previous_delivery == AlertDeliveryState::Pending
             {
-                remove_condition_from_pending_alerts(&transaction, &evaluation.id)?;
+                cancel_unsent_condition(&transaction, &evaluation.id, Some(TransitionKind::Alert))?;
                 state.alert_delivery_state = AlertDeliveryState::Never;
                 evaluation.notification_state = AlertDeliveryState::Never;
             }
@@ -272,18 +365,18 @@ impl StateStore {
             (transition_order(left.kind), &left.condition_id)
                 .cmp(&(transition_order(right.kind), &right.condition_id))
         });
-        report.transitions.clone_from(&transitions);
-        report.findings = report
+        candidate.transitions.clone_from(&transitions);
+        candidate.findings = candidate
             .evaluations
             .iter()
             .filter(|evaluation| evaluation.outcome == sentinel_core::EvaluationOutcome::Active)
             .map(Finding::from)
             .collect();
-        report
+        candidate
             .findings
             .sort_by(|left, right| left.id.cmp(&right.id));
-        let outbox = build_outbox(report, &transitions, suppress_notifications);
-        report.notifications = outbox
+        let outbox = build_outbox(&candidate, &transitions, suppress_notifications);
+        candidate.notifications = outbox
             .iter()
             .map(|message| NotificationReport {
                 id: message.id.clone(),
@@ -294,30 +387,33 @@ impl StateStore {
                 error_class: None,
             })
             .collect();
-
-        insert_run(&transaction, report)?;
-        insert_targets(&transaction, report)?;
-        insert_aggregate(&transaction, report)?;
-        insert_evaluations(&transaction, report)?;
+        insert_run(&transaction, &candidate)?;
+        insert_targets(&transaction, &candidate)?;
+        insert_aggregate(&transaction, &candidate)?;
         for state in &states {
             upsert_condition_state(&transaction, state)?;
         }
-        update_runtime_states(&transaction, report, config, now_unix_seconds)?;
-        insert_outbox(&transaction, &outbox, &report.completed_at)?;
-        prune_runs(&transaction, retention_cutoff)?;
+        insert_evaluations(&transaction, &candidate)?;
+        update_runtime_states(&transaction, &candidate, config, now_unix_seconds)?;
+        insert_outbox(&transaction, &outbox, &candidate.completed_at, &transitions)?;
+        prune_runs(&transaction, &canonical_timestamp(retention_cutoff)?)?;
         transaction.commit()?;
+        *report = candidate;
         Ok(outbox)
     }
 
     pub fn pending_outbox(&self, now: &str) -> Result<Vec<OutboxMessage>, StoreError> {
+        let now = canonical_timestamp(now)?;
         let mut statement = self.connection.prepare(
             "SELECT id, run_id, transition, title, message, priority, status
              FROM notification_outbox
              WHERE status IN ('pending', 'retryable')
                AND (next_retry_at IS NULL OR next_retry_at <= ?1)
-             ORDER BY created_at ASC, id ASC",
+             ORDER BY created_at ASC,
+                      CASE transition WHEN 'alert' THEN 0 ELSE 1 END ASC,
+                      rowid ASC",
         )?;
-        let rows = statement.query_map([now], |row| {
+        let rows = statement.query_map([&now], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -346,14 +442,184 @@ impl StateStore {
         Ok(messages)
     }
 
-    pub fn record_notification_attempt(
+    /// Claims a message durably before any bytes can be transmitted.
+    pub fn begin_notification_attempt(
         &mut self,
         message: &OutboxMessage,
         started_at: &str,
+        executing_run_id: &str,
+    ) -> Result<NotificationAttempt, StoreError> {
+        let started_at = canonical_timestamp(started_at)?;
+        let transaction = self.connection.transaction()?;
+        let mut stored = load_outbox_message(&transaction, &message.id)?;
+        let (retry_at, created_at, latest_completed): (Option<String>, String, Option<String>) = transaction.query_row(
+            "SELECT next_retry_at, created_at, (SELECT MAX(completed_at) FROM runs) FROM notification_outbox WHERE id = ?1",
+            [&stored.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let created_at = canonical_timestamp(&created_at)?;
+        let latest_completed = latest_completed
+            .as_deref()
+            .map(canonical_timestamp)
+            .transpose()?;
+        if started_at < created_at
+            || latest_completed
+                .as_ref()
+                .is_some_and(|latest| started_at < *latest)
+        {
+            return Err(StoreError::InvalidData(
+                "wall clock regressed before notification delivery; no attempt was started"
+                    .to_owned(),
+            ));
+        }
+        if !matches!(
+            stored.status,
+            NotificationStatus::Pending | NotificationStatus::Retryable
+        ) || retry_at
+            .as_deref()
+            .is_some_and(|retry| retry > started_at.as_str())
+            || (stored.status == NotificationStatus::Retryable && retry_at.is_none())
+        {
+            return Err(StoreError::InvalidData(
+                "notification is not eligible for a delivery attempt".to_owned(),
+            ));
+        }
+        let members = notification_members(&transaction, &stored.id)?;
+        if members.is_empty() || members.iter().any(|(_, episode, _)| episode.is_empty()) {
+            return Err(StoreError::InvalidData(
+                "notification has no valid episode membership".to_owned(),
+            ));
+        }
+        let expected = members
+            .iter()
+            .map(|(_, _, summary)| notification_line(summary))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if expected != stored.message || expected.chars().count() > 1_024 {
+            return Err(StoreError::InvalidData(
+                "notification payload does not match its condition membership".to_owned(),
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO notification_attempts(id, notification_id, started_at, completed_at, outcome, executing_run_id) VALUES (?1, ?2, ?3, NULL, 'in_flight', ?4)",
+            params![id, stored.id, started_at, executing_run_id],
+        )?;
+        transaction.execute(
+            "UPDATE notification_outbox SET status = 'in_flight', attempt_id = ?2 WHERE id = ?1",
+            params![stored.id, id],
+        )?;
+        record_delivery_activity(
+            &transaction,
+            executing_run_id,
+            DeliveryActivity {
+                attempt_id: id.clone(),
+                origin_run_id: stored.run_id.clone(),
+                action: DeliveryAction::Attempt,
+                notification: NotificationReport {
+                    id: stored.id.clone(),
+                    transition: stored.transition,
+                    condition_ids: stored.condition_ids.clone(),
+                    status: NotificationStatus::InFlight,
+                    remote_request_id: None,
+                    error_class: None,
+                },
+            },
+        )?;
+        transaction.commit()?;
+        stored.status = NotificationStatus::InFlight;
+        Ok(NotificationAttempt {
+            message: stored,
+            id,
+            started_at,
+            executing_run_id: executing_run_id.to_owned(),
+        })
+    }
+
+    /// Quarantines sends whose process ended without a committed result.
+    pub fn recover_interrupted_attempts(
+        &mut self,
+        recovered_at: &str,
+    ) -> Result<Vec<DeliveryActivity>, StoreError> {
+        let recovered_at = canonical_timestamp(recovered_at)?;
+        let interrupted = {
+            let mut statement = self.connection.prepare(
+                "SELECT n.id, n.attempt_id, a.started_at, a.executing_run_id FROM notification_outbox n
+                 LEFT JOIN notification_attempts a ON a.id = n.attempt_id AND a.notification_id = n.id
+                 WHERE n.status = 'in_flight' ORDER BY n.created_at, n.rowid",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut recovered = Vec::new();
+        for (message_id, id, started_at, executing_run_id) in interrupted {
+            let id = id.ok_or_else(|| {
+                StoreError::InvalidData("in-flight notification has no attempt".to_owned())
+            })?;
+            let started_at = started_at.ok_or_else(|| {
+                StoreError::InvalidData("in-flight notification has no durable start".to_owned())
+            })?;
+            let executing_run_id = executing_run_id.ok_or_else(|| {
+                StoreError::InvalidData("in-flight notification has no executing run".to_owned())
+            })?;
+            let completed_at = recovered_at.as_str().max(started_at.as_str()).to_owned();
+            let attempt = NotificationAttempt {
+                message: load_outbox_message(&self.connection, &message_id)?,
+                id,
+                started_at,
+                executing_run_id,
+            };
+            let notification = self.record_notification_attempt(
+                &attempt,
+                &completed_at,
+                &NotificationAttemptOutcome::Unknown {
+                    error_class: "process_interrupted_after_possible_transmission".to_owned(),
+                },
+            )?;
+            recovered.push(DeliveryActivity {
+                attempt_id: attempt.id,
+                origin_run_id: attempt.message.run_id,
+                action: DeliveryAction::Recovered,
+                notification,
+            });
+        }
+        Ok(recovered)
+    }
+
+    pub fn record_notification_attempt(
+        &mut self,
+        attempt: &NotificationAttempt,
         completed_at: &str,
         outcome: &NotificationAttemptOutcome,
     ) -> Result<NotificationReport, StoreError> {
+        let completed_at = canonical_timestamp(completed_at)?;
+        if completed_at < attempt.started_at {
+            return Err(StoreError::InvalidData(
+                "wall clock regressed during notification delivery; outcome remains unconfirmed"
+                    .to_owned(),
+            ));
+        }
         let transaction = self.connection.transaction()?;
+        let message = load_outbox_message(&transaction, &attempt.message.id)?;
+        let current_attempt: Option<String> = transaction.query_row(
+            "SELECT attempt_id FROM notification_outbox WHERE id = ?1",
+            [&message.id],
+            |row| row.get(0),
+        )?;
+        if message.status != NotificationStatus::InFlight
+            || current_attempt.as_deref() != Some(attempt.id.as_str())
+        {
+            return Err(StoreError::InvalidData(
+                "notification attempt is no longer in flight".to_owned(),
+            ));
+        }
         let (status, outcome_label, http_status, remote_request_id, error_class) = match outcome {
             NotificationAttemptOutcome::Delivered {
                 http_status,
@@ -394,51 +660,35 @@ impl StateStore {
                 Some(error_class.clone()),
             ),
         };
-        transaction.execute(
-            "INSERT INTO notification_attempts(
-               id, notification_id, started_at, completed_at, outcome, http_status, remote_request_id, error_class
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                Uuid::new_v4().to_string(),
-                message.id,
-                started_at,
-                completed_at,
-                outcome_label,
-                http_status,
-                remote_request_id,
-                error_class,
-            ],
+        let updated = transaction.execute(
+            "UPDATE notification_attempts SET completed_at = ?2, outcome = ?3, http_status = ?4, remote_request_id = ?5, error_class = ?6
+             WHERE id = ?1 AND notification_id = ?7 AND outcome = 'in_flight' AND completed_at IS NULL",
+            params![attempt.id, completed_at, outcome_label, http_status, remote_request_id, error_class, message.id],
         )?;
-        let delivered_at = if status == NotificationStatus::Delivered {
-            Some(completed_at)
-        } else {
-            None
-        };
+        if updated != 1 {
+            return Err(StoreError::InvalidData(
+                "notification attempt lacks an unfinished durable record".to_owned(),
+            ));
+        }
         let next_retry_at = if status == NotificationStatus::Retryable {
-            let completed = completed_at.parse::<Timestamp>().map_err(|error| {
-                StoreError::InvalidData(format!("invalid attempt timestamp: {error}"))
-            })?;
-            Some(
-                Timestamp::new(completed.as_second().saturating_add(5), 0)
+            let completed = completed_at
+                .parse::<Timestamp>()
+                .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+            let second = completed
+                .as_second()
+                .checked_add(5)
+                .ok_or_else(|| StoreError::InvalidData("retry timestamp overflows".to_owned()))?;
+            Some(format!(
+                "{:.9}",
+                Timestamp::new(second, completed.subsec_nanosecond())
                     .map_err(|error| StoreError::InvalidData(error.to_string()))?
-                    .to_string(),
-            )
+            ))
         } else {
             None
         };
         transaction.execute(
-            "UPDATE notification_outbox
-             SET status = ?2, delivered_at = ?3, remote_request_id = ?4, error_class = ?5,
-                 next_retry_at = ?6
-             WHERE id = ?1",
-            params![
-                message.id,
-                encode(status)?,
-                delivered_at,
-                remote_request_id,
-                error_class,
-                next_retry_at,
-            ],
+            "UPDATE notification_outbox SET status = ?2, delivered_at = ?3, remote_request_id = ?4, error_class = ?5, next_retry_at = ?6 WHERE id = ?1",
+            params![message.id, encode(status)?, if status == NotificationStatus::Delivered { Some(&completed_at) } else { None }, remote_request_id, error_class, next_retry_at],
         )?;
         let delivery_state = match status {
             NotificationStatus::Delivered if message.transition == TransitionKind::Alert => {
@@ -447,58 +697,79 @@ impl StateStore {
             NotificationStatus::Delivered => Some(AlertDeliveryState::Resolved),
             NotificationStatus::Failed => Some(AlertDeliveryState::Failed),
             NotificationStatus::Unknown => Some(AlertDeliveryState::Unknown),
-            NotificationStatus::Pending
-            | NotificationStatus::Suppressed
-            | NotificationStatus::Retryable
-            | NotificationStatus::Cancelled => None,
+            _ => None,
         };
         if let Some(delivery_state) = delivery_state {
-            for condition_id in &message.condition_ids {
+            for (condition_id, episode, _) in notification_members(&transaction, &message.id)? {
                 transaction.execute(
-                    "UPDATE condition_state SET alert_delivery_state = ?2 WHERE condition_id = ?1",
-                    params![condition_id, encode(delivery_state)?],
+                    "UPDATE condition_state SET alert_delivery_state = ?3 WHERE condition_id = ?1 AND episode_id = ?2",
+                    params![condition_id, episode, encode(delivery_state)?],
                 )?;
-                let serialized: Option<String> = transaction
-                    .query_row(
-                        "SELECT evidence_json FROM condition_evaluations
-                         WHERE run_id = ?1 AND condition_id = ?2",
-                        params![message.run_id, condition_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if let Some(serialized) = serialized {
-                    let mut evaluation: ConditionEvaluation = serde_json::from_str(&serialized)
-                        .map_err(|error| StoreError::InvalidData(error.to_string()))?;
-                    evaluation.notification_state = delivery_state;
-                    transaction.execute(
-                        "UPDATE condition_evaluations SET evidence_json = ?3
-                         WHERE run_id = ?1 AND condition_id = ?2",
-                        params![
-                            message.run_id,
-                            condition_id,
-                            serde_json::to_string(&evaluation)
-                                .map_err(|error| StoreError::InvalidData(error.to_string()))?,
-                        ],
-                    )?;
-                }
+                refresh_evaluation(
+                    &transaction,
+                    &message.run_id,
+                    &condition_id,
+                    &episode,
+                    delivery_state,
+                )?;
             }
         }
-        transaction.commit()?;
-        Ok(NotificationReport {
-            id: message.id.clone(),
+        let report = NotificationReport {
+            id: message.id,
             transition: message.transition,
-            condition_ids: message.condition_ids.clone(),
+            condition_ids: message.condition_ids,
             status,
             remote_request_id,
             error_class,
-        })
+        };
+        record_delivery_activity(
+            &transaction,
+            &attempt.executing_run_id,
+            DeliveryActivity {
+                attempt_id: attempt.id.clone(),
+                origin_run_id: message.run_id,
+                action: DeliveryAction::Attempt,
+                notification: report.clone(),
+            },
+        )?;
+        if status != NotificationStatus::Delivered {
+            transaction.execute(
+                "UPDATE runs SET exit_code = 4 WHERE id = ?1",
+                [&attempt.executing_run_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(report)
     }
 
-    pub fn update_run_exit(&self, run_id: &str, exit_code: u8) -> Result<(), StoreError> {
-        self.connection.execute(
-            "UPDATE runs SET exit_code = ?2 WHERE id = ?1",
-            params![run_id, i64::from(exit_code)],
-        )?;
+    /// Updates the current report only from condition state belonging to its episode.
+    pub fn refresh_run_delivery(&mut self, run_id: &str) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        let states = {
+            let mut statement = transaction.prepare(
+                "SELECT e.condition_id, e.episode_id, s.alert_delivery_state FROM condition_evaluations e
+                 JOIN condition_state s ON s.condition_id = e.condition_id AND s.episode_id = e.episode_id WHERE e.run_id = ?1",
+            )?;
+            statement
+                .query_map([run_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (condition_id, episode, state) in states {
+            refresh_evaluation(
+                &transaction,
+                run_id,
+                &condition_id,
+                &episode,
+                decode(&state)?,
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -507,10 +778,12 @@ impl StateStore {
         limit: usize,
         since: Option<&str>,
     ) -> Result<Vec<RunReport>, StoreError> {
+        let since = since.map(canonical_timestamp).transpose()?;
+        let snapshot = self.connection.unchecked_transaction()?;
         let mut statement = self.connection.prepare(
             "SELECT id FROM runs
              WHERE (?1 IS NULL OR completed_at >= ?1)
-             ORDER BY completed_at DESC
+             ORDER BY completed_at DESC, rowid DESC
              LIMIT ?2",
         )?;
         let ids = statement
@@ -519,7 +792,13 @@ impl StateStore {
                 |row| row.get::<_, String>(0),
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        ids.into_iter().map(|id| self.load_report(&id)).collect()
+        drop(statement);
+        let reports = ids
+            .into_iter()
+            .map(|id| self.load_report(&id))
+            .collect::<Result<Vec<_>, _>>()?;
+        snapshot.commit()?;
+        Ok(reports)
     }
 
     fn load_report(&self, run_id: &str) -> Result<RunReport, StoreError> {
@@ -533,9 +812,11 @@ impl StateStore {
             complete_targets,
             minimum_targets,
             exit_code,
+            health_issues_json,
+            delivery_activity_json,
         ) = self.connection.query_row(
             "SELECT started_at, completed_at, mode, config_sha256, status,
-                    expected_targets, complete_targets, minimum_targets, exit_code
+                    expected_targets, complete_targets, minimum_targets, exit_code, health_issues_json, delivery_activity_json
              FROM runs WHERE id = ?1",
             [run_id],
             |row| {
@@ -549,6 +830,8 @@ impl StateStore {
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
                 ))
             },
         )?;
@@ -584,15 +867,14 @@ impl StateStore {
             findings,
             transitions,
             notifications,
+            delivery_activity: serde_json::from_str(&delivery_activity_json)
+                .map_err(|error| StoreError::InvalidData(error.to_string()))?,
             health: RunHealth {
                 minimum_complete_targets: minimum_targets,
                 complete_targets,
                 met,
-                issues: if met {
-                    Vec::new()
-                } else {
-                    vec!["minimum complete target count was not met".to_owned()]
-                },
+                issues: serde_json::from_str(&health_issues_json)
+                    .map_err(|error| StoreError::InvalidData(error.to_string()))?,
             },
             exit: ExitReport {
                 code: exit_code,
@@ -604,34 +886,43 @@ impl StateStore {
 
 fn validate_schema(connection: &Connection) -> Result<(), StoreError> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version != STATE_VERSION {
-        return Err(StoreError::UnsupportedVersion {
-            observed: version,
-            expected: STATE_VERSION,
-        });
+    if version == 1 {
+        return Err(StoreError::MigrationRequired);
     }
-    let stored_checksum: Option<String> = connection
-        .query_row(
-            "SELECT checksum FROM schema_migrations WHERE version = ?1",
-            [STATE_VERSION],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let expected_checksum = schema_checksum();
-    if stored_checksum.as_deref() != Some(expected_checksum.as_str()) {
-        return Err(StoreError::InvalidData(
-            "state migration checksum is absent or does not match schema v1".to_owned(),
-        ));
+    schema::validate(connection, STATE_VERSION)
+}
+
+fn backup_version_one(connection: &Connection, path: &Path) -> Result<PathBuf, StoreError> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".v1-{}.bak", Uuid::new_v4()));
+    let backup = PathBuf::from(name);
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(())
+    let file = options.open(&backup)?;
+    connection.execute(
+        "VACUUM main INTO ?1",
+        [backup
+            .to_str()
+            .ok_or_else(|| StoreError::InvalidData("backup path is not UTF-8".to_owned()))?],
+    )?;
+    let saved = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    schema::validate(&saved, 1)?;
+    drop(saved);
+    file.sync_all()?;
+    Ok(backup)
 }
 
 fn insert_run(transaction: &Transaction<'_>, report: &RunReport) -> Result<(), StoreError> {
     transaction.execute(
         "INSERT INTO runs(
            id, started_at, completed_at, mode, config_sha256, status,
-           expected_targets, complete_targets, minimum_targets, exit_code
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+           expected_targets, complete_targets, minimum_targets, exit_code, health_issues_json, delivery_activity_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             report.run_id,
             report.started_at,
@@ -643,6 +934,8 @@ fn insert_run(transaction: &Transaction<'_>, report: &RunReport) -> Result<(), S
             i64_from_usize(report.complete_targets)?,
             i64_from_usize(report.minimum_complete_targets)?,
             i64::from(report.exit.code),
+            serde_json::to_string(&report.health.issues).map_err(|error| StoreError::InvalidData(error.to_string()))?,
+            serde_json::to_string(&report.delivery_activity).map_err(|error| StoreError::InvalidData(error.to_string()))?,
         ],
     )?;
     Ok(())
@@ -650,7 +943,17 @@ fn insert_run(transaction: &Transaction<'_>, report: &RunReport) -> Result<(), S
 
 fn prune_runs(transaction: &Transaction<'_>, retention_cutoff: &str) -> Result<(), StoreError> {
     transaction.execute(
-        "DELETE FROM runs WHERE completed_at < ?1",
+        "WITH precision_barriers AS MATERIALIZED (
+             SELECT t.run_id, ROW_NUMBER() OVER (
+                 PARTITION BY t.target_id ORDER BY r.completed_at DESC, r.rowid DESC
+             ) AS newest
+             FROM target_observations t JOIN runs r ON r.id = t.run_id
+             WHERE t.counters_exact = 0
+         )
+         DELETE FROM runs WHERE completed_at < ?1
+           AND id NOT IN (SELECT run_id FROM precision_barriers WHERE newest = 1)
+           AND NOT EXISTS (SELECT 1 FROM notification_outbox n WHERE n.run_id = runs.id
+               AND n.status IN ('pending', 'retryable', 'in_flight', 'unknown', 'failed'))",
         [retention_cutoff],
     )?;
     Ok(())
@@ -678,8 +981,8 @@ fn insert_targets(transaction: &Transaction<'_>, report: &RunReport) -> Result<(
                 bool_i64(target.complete),
                 target.server_version,
                 operational.map(|value| bool_i64(value.protection_enabled)),
-                operational.map(|value| i64::try_from(value.queries).unwrap_or(i64::MAX)),
-                operational.map(|value| i64::try_from(value.blocked).unwrap_or(i64::MAX)),
+                operational.map(|value| value.queries.to_string()),
+                operational.map(|value| value.blocked.to_string()),
                 operational.map(|value| value.blocked_ratio),
                 operational.map(|value| value.average_processing_seconds),
                 operational.map(|value| value.maximum_upstream_seconds),
@@ -726,7 +1029,7 @@ fn insert_targets(transaction: &Transaction<'_>, report: &RunReport) -> Result<(
                     filter.url,
                     filter.server_id,
                     bool_i64(filter.enabled),
-                    i64::try_from(filter.rules_count).unwrap_or(i64::MAX),
+                    filter.rules_count.to_string(),
                     filter.last_updated,
                     filter.last_updated_unix_seconds,
                 ],
@@ -762,7 +1065,7 @@ fn insert_aggregate(transaction: &Transaction<'_>, report: &RunReport) -> Result
                 report.run_id,
                 i64::from(aggregate.local_hour),
                 i64::from(aggregate.utc_offset_minutes),
-                i64::try_from(aggregate.combined_queries).unwrap_or(i64::MAX),
+                aggregate.combined_queries.to_string(),
                 aggregate.combined_blocked_ratio,
                 aggregate.baseline_age_seconds,
                 i64_from_usize(aggregate.same_hour_samples)?,
@@ -782,8 +1085,9 @@ fn insert_evaluations(transaction: &Transaction<'_>, report: &RunReport) -> Resu
         transaction.execute(
             "INSERT INTO condition_evaluations(
                run_id, condition_id, outcome, expected_json, observed_json,
-               evidence_json, complete
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+               evidence_json, complete, episode_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                       (SELECT episode_id FROM condition_state WHERE condition_id = ?2))",
             params![
                 report.run_id,
                 evaluation.id,
@@ -858,48 +1162,92 @@ fn build_outbox(
 ) -> Vec<OutboxMessage> {
     let mut messages = Vec::new();
     for kind in [TransitionKind::Alert, TransitionKind::Resolution] {
-        let selected: Vec<_> = transitions
+        let mut lines = Vec::new();
+        let mut condition_ids = Vec::new();
+        let mut length = 0;
+        for transition in transitions
             .iter()
             .filter(|transition| transition.kind == kind)
-            .collect();
-        if selected.is_empty() {
-            continue;
+        {
+            let line = notification_line(&transition.summary);
+            let line_length = line.chars().count();
+            if !lines.is_empty() && length + 1 + line_length > 1_024 {
+                messages.push(notification_batch(
+                    report,
+                    kind,
+                    suppressed,
+                    &lines,
+                    condition_ids,
+                ));
+                lines.clear();
+                condition_ids = Vec::new();
+                length = 0;
+            }
+            if !lines.is_empty() {
+                length += 1;
+            }
+            length += line_length;
+            lines.push(line);
+            condition_ids.push(transition.condition_id.clone());
         }
-        let condition_ids = selected
-            .iter()
-            .map(|transition| transition.condition_id.clone())
-            .collect::<Vec<_>>();
-        let lines = selected
-            .iter()
-            .map(|transition| format!("- {}", transition.summary))
-            .collect::<Vec<_>>()
-            .join("\n");
-        messages.push(OutboxMessage {
-            id: Uuid::new_v4().to_string(),
-            run_id: report.run_id.clone(),
-            transition: kind,
-            title: if kind == TransitionKind::Alert {
-                "AdGuard anomaly detected".to_owned()
-            } else {
-                "AdGuard anomaly resolved".to_owned()
-            },
-            message: truncate_chars(&lines, 1_024),
-            priority: if kind == TransitionKind::Alert { 0 } else { -1 },
-            status: if suppressed {
-                NotificationStatus::Suppressed
-            } else {
-                NotificationStatus::Pending
-            },
-            condition_ids,
-        });
+        if !lines.is_empty() {
+            messages.push(notification_batch(
+                report,
+                kind,
+                suppressed,
+                &lines,
+                condition_ids,
+            ));
+        }
     }
     messages
+}
+
+fn notification_line(summary: &str) -> String {
+    const SUFFIX: &str = " [truncated; see report]";
+    let line = format!("- {summary}");
+    if line.chars().count() <= 1_024 {
+        line
+    } else {
+        format!(
+            "{}{SUFFIX}",
+            truncate_chars(&line, 1_024 - SUFFIX.chars().count())
+        )
+    }
+}
+
+fn notification_batch(
+    report: &RunReport,
+    kind: TransitionKind,
+    suppressed: bool,
+    lines: &[String],
+    condition_ids: Vec<String>,
+) -> OutboxMessage {
+    OutboxMessage {
+        id: Uuid::new_v4().to_string(),
+        run_id: report.run_id.clone(),
+        transition: kind,
+        title: if kind == TransitionKind::Alert {
+            "AdGuard anomaly detected".to_owned()
+        } else {
+            "AdGuard anomaly resolved".to_owned()
+        },
+        message: lines.join("\n"),
+        priority: if kind == TransitionKind::Alert { 0 } else { -1 },
+        status: if suppressed {
+            NotificationStatus::Suppressed
+        } else {
+            NotificationStatus::Pending
+        },
+        condition_ids,
+    }
 }
 
 fn insert_outbox(
     transaction: &Transaction<'_>,
     outbox: &[OutboxMessage],
     created_at: &str,
+    transitions: &[ConditionTransition],
 ) -> Result<(), StoreError> {
     for message in outbox {
         transaction.execute(
@@ -918,9 +1266,26 @@ fn insert_outbox(
             ],
         )?;
         for condition_id in &message.condition_ids {
+            let summary = transitions
+                .iter()
+                .find(|transition| {
+                    &transition.condition_id == condition_id
+                        && transition.kind == message.transition
+                })
+                .ok_or_else(|| {
+                    StoreError::InvalidData("notification member lacks its transition".to_owned())
+                })?;
+            let episode: Option<String> = transaction.query_row(
+                "SELECT episode_id FROM condition_state WHERE condition_id = ?1",
+                [condition_id],
+                |row| row.get(0),
+            )?;
+            let episode = episode.ok_or_else(|| {
+                StoreError::InvalidData("notification member lacks its episode".to_owned())
+            })?;
             transaction.execute(
-                "INSERT INTO notification_conditions(notification_id, condition_id) VALUES (?1, ?2)",
-                params![message.id, condition_id],
+                "INSERT INTO notification_conditions(notification_id, condition_id, episode_id, summary) VALUES (?1, ?2, ?3, ?4)",
+                params![message.id, condition_id, episode, summary.summary],
             )?;
         }
     }
@@ -935,7 +1300,7 @@ fn load_condition_state(
         .query_row(
             "SELECT target_id, kind, severity, lifecycle, first_observed_at,
                     last_observed_at, active_count, clear_count, alert_delivery_state,
-                    last_transition_run
+                    last_transition_run, episode_id
              FROM condition_state WHERE condition_id = ?1",
             [&evaluation.id],
             |row| {
@@ -950,6 +1315,7 @@ fn load_condition_state(
                     row.get::<_, i64>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             },
         )
@@ -969,6 +1335,7 @@ fn load_condition_state(
                 consecutive_clear: u32_from_i64(row.7, "clear count")?,
                 alert_delivery_state: decode(&row.8)?,
                 last_transition_run: row.9,
+                episode_id: row.10,
             })
         })
         .transpose()
@@ -982,8 +1349,8 @@ pub(crate) fn upsert_condition_state(
         "INSERT INTO condition_state(
            condition_id, target_id, kind, severity, lifecycle, first_observed_at,
            last_observed_at, active_count, clear_count, alert_delivery_state,
-           last_transition_run
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+           last_transition_run, episode_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(condition_id) DO UPDATE SET
            target_id = excluded.target_id,
            kind = excluded.kind,
@@ -994,7 +1361,8 @@ pub(crate) fn upsert_condition_state(
            active_count = excluded.active_count,
            clear_count = excluded.clear_count,
            alert_delivery_state = excluded.alert_delivery_state,
-           last_transition_run = excluded.last_transition_run",
+           last_transition_run = excluded.last_transition_run,
+           episode_id = excluded.episode_id",
         params![
             state.id,
             state.target_id,
@@ -1007,64 +1375,140 @@ pub(crate) fn upsert_condition_state(
             i64::from(state.consecutive_clear),
             encode(state.alert_delivery_state)?,
             state.last_transition_run,
+            state.episode_id,
         ],
     )?;
     Ok(())
 }
 
-fn remove_condition_from_pending_alerts(
+fn cancel_unsent_condition(
     transaction: &Transaction<'_>,
     condition_id: &str,
+    kind: Option<TransitionKind>,
 ) -> Result<(), StoreError> {
-    let mut statement = transaction.prepare(
-        "SELECT n.id
-         FROM notification_outbox n
-         JOIN notification_conditions c ON c.notification_id = n.id
-         WHERE c.condition_id = ?1 AND n.transition = 'alert'
-           AND n.status IN ('pending', 'retryable')",
-    )?;
-    let notification_ids = statement
-        .query_map([condition_id], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
-    for notification_id in notification_ids {
-        transaction.execute(
-            "DELETE FROM notification_conditions
-             WHERE notification_id = ?1 AND condition_id = ?2",
-            params![notification_id, condition_id],
+    let kind = kind.map(encode).transpose()?;
+    let ids = {
+        let mut statement = transaction.prepare(
+            "SELECT n.id FROM notification_outbox n JOIN notification_conditions c ON c.notification_id = n.id
+             WHERE c.condition_id = ?1 AND (?2 IS NULL OR n.transition = ?2)
+               AND n.status IN ('pending', 'retryable') ORDER BY n.created_at, n.rowid",
         )?;
-        let remaining: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM notification_conditions WHERE notification_id = ?1",
-            [&notification_id],
-            |row| row.get(0),
-        )?;
-        if remaining == 0 {
+        statement
+            .query_map(params![condition_id, kind], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        let original = load_outbox_message(transaction, &id)?;
+        let survivors = notification_members(transaction, &id)?
+            .into_iter()
+            .filter(|(member, _, _)| member != condition_id)
+            .collect::<Vec<_>>();
+        // Keep original membership, payload and attempts as historical evidence.
+        // A replacement contains only surviving immutable summaries.
+        if !survivors.is_empty() {
+            let replacement = Uuid::new_v4().to_string();
+            let payload = survivors
+                .iter()
+                .map(|(_, _, summary)| notification_line(summary))
+                .collect::<Vec<_>>()
+                .join("\n");
             transaction.execute(
-                "UPDATE notification_outbox SET status = 'cancelled' WHERE id = ?1",
-                [&notification_id],
+                "INSERT INTO notification_outbox(id, run_id, transition, title, message, priority, status, created_at, next_retry_at)
+                 SELECT ?2, run_id, transition, title, ?3, priority, status, created_at, next_retry_at FROM notification_outbox WHERE id = ?1",
+                params![id, replacement, payload],
             )?;
-        } else {
-            let condition_ids = load_notification_conditions(transaction, &notification_id)?;
-            let mut lines = Vec::new();
-            for remaining_id in condition_ids {
-                let serialized: String = transaction.query_row(
-                    "SELECT e.evidence_json
-                     FROM condition_evaluations e
-                     JOIN runs r ON r.id = e.run_id
-                     WHERE e.condition_id = ?1
-                     ORDER BY r.completed_at DESC LIMIT 1",
-                    [&remaining_id],
-                    |row| row.get(0),
+            for (member, episode, summary) in survivors {
+                transaction.execute(
+                    "INSERT INTO notification_conditions(notification_id, condition_id, episode_id, summary) VALUES (?1, ?2, ?3, ?4)",
+                    params![replacement, member, episode, summary],
                 )?;
-                let evaluation: ConditionEvaluation = serde_json::from_str(&serialized)
-                    .map_err(|error| StoreError::InvalidData(error.to_string()))?;
-                lines.push(format!("- {}", evaluation.summary));
             }
-            transaction.execute(
-                "UPDATE notification_outbox SET message = ?2 WHERE id = ?1",
-                params![notification_id, truncate_chars(&lines.join("\n"), 1_024)],
-            )?;
         }
+        transaction.execute("UPDATE notification_outbox SET status = 'cancelled', next_retry_at = NULL WHERE id = ?1", [&original.id])?;
+    }
+    Ok(())
+}
+
+fn notification_members(
+    connection: &Connection,
+    id: &str,
+) -> Result<Vec<(String, String, String)>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT condition_id, episode_id, summary FROM notification_conditions WHERE notification_id = ?1 ORDER BY condition_id",
+    )?;
+    statement
+        .query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
+}
+
+fn load_outbox_message(connection: &Connection, id: &str) -> Result<OutboxMessage, StoreError> {
+    let (run_id, kind, title, message, priority, status) = connection.query_row(
+        "SELECT run_id, transition, title, message, priority, status FROM notification_outbox WHERE id = ?1", [id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                  row.get::<_, String>(3)?, row.get::<_, i64>(4)?, row.get::<_, String>(5)?)),
+    )?;
+    Ok(OutboxMessage {
+        id: id.to_owned(),
+        run_id,
+        transition: decode(&kind)?,
+        title,
+        message,
+        priority: i8::try_from(priority)
+            .map_err(|_| StoreError::InvalidData("priority out of range".to_owned()))?,
+        status: decode(&status)?,
+        condition_ids: load_notification_conditions(connection, id)?,
+    })
+}
+
+fn record_delivery_activity(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    activity: DeliveryActivity,
+) -> Result<(), StoreError> {
+    let serialized: String = transaction.query_row(
+        "SELECT delivery_activity_json FROM runs WHERE id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let mut activities: Vec<DeliveryActivity> = serde_json::from_str(&serialized)
+        .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+    if let Some(existing) = activities
+        .iter_mut()
+        .find(|existing| existing.attempt_id == activity.attempt_id)
+    {
+        *existing = activity;
+    } else {
+        activities.push(activity);
+    }
+    transaction.execute(
+        "UPDATE runs SET delivery_activity_json = ?2 WHERE id = ?1",
+        params![
+            run_id,
+            serde_json::to_string(&activities)
+                .map_err(|error| StoreError::InvalidData(error.to_string()))?
+        ],
+    )?;
+    Ok(())
+}
+
+fn refresh_evaluation(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    condition_id: &str,
+    episode: &str,
+    state: AlertDeliveryState,
+) -> Result<(), StoreError> {
+    let serialized: Option<String> = transaction.query_row(
+        "SELECT evidence_json FROM condition_evaluations WHERE run_id = ?1 AND condition_id = ?2 AND episode_id = ?3",
+        params![run_id, condition_id, episode], |row| row.get(0),
+    ).optional()?;
+    if let Some(serialized) = serialized {
+        let mut evaluation: ConditionEvaluation = serde_json::from_str(&serialized)
+            .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+        evaluation.notification_state = state;
+        transaction.execute("UPDATE condition_evaluations SET evidence_json = ?3 WHERE run_id = ?1 AND condition_id = ?2",
+            params![run_id, condition_id, serde_json::to_string(&evaluation).map_err(|error| StoreError::InvalidData(error.to_string()))?])?;
     }
     Ok(())
 }
@@ -1086,8 +1530,8 @@ fn load_targets(connection: &Connection, run_id: &str) -> Result<Vec<TargetRepor
             row.get::<_, i64>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<i64>>(5)?,
-            row.get::<_, Option<i64>>(6)?,
-            row.get::<_, Option<i64>>(7)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
             row.get::<_, Option<f64>>(8)?,
             row.get::<_, Option<f64>>(9)?,
             row.get::<_, Option<f64>>(10)?,
@@ -1114,8 +1558,8 @@ fn load_targets(connection: &Connection, run_id: &str) -> Result<Vec<TargetRepor
                 Some(client),
             ) => Some(OperationalObservation {
                 protection_enabled: protection != 0,
-                queries: u64_from_i64(queries, "query count")?,
-                blocked: u64_from_i64(blocked, "blocked count")?,
+                queries: parse_counter(&queries, "query count")?,
+                blocked: parse_counter(&blocked, "blocked count")?,
                 blocked_ratio: ratio,
                 average_processing_seconds: processing,
                 maximum_upstream_seconds: upstream,
@@ -1188,7 +1632,7 @@ fn load_filters(
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
+            row.get::<_, String>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<i64>>(5)?,
         ))
@@ -1199,7 +1643,7 @@ fn load_filters(
             url: row.0,
             server_id: row.1,
             enabled: row.2 != 0,
-            rules_count: u64_from_i64(row.3, "rules count")?,
+            rules_count: parse_counter(&row.3, "rules count")?,
             last_updated: row.4,
             last_updated_unix_seconds: row.5,
         })
@@ -1250,7 +1694,7 @@ fn load_aggregate(
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(2)?,
                     row.get::<_, f64>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
@@ -1267,7 +1711,7 @@ fn load_aggregate(
                 .map_err(|_| StoreError::InvalidData("local hour out of range".to_owned()))?,
             utc_offset_minutes: i32::try_from(row.1)
                 .map_err(|_| StoreError::InvalidData("UTC offset out of range".to_owned()))?,
-            combined_queries: u64_from_i64(row.2, "combined query count")?,
+            combined_queries: parse_counter(&row.2, "combined query count")?,
             combined_blocked_ratio: row.3,
             baseline_age_seconds: row.4,
             same_hour_samples: usize_from_i64(row.5, "same-hour sample count")?,
@@ -1302,7 +1746,7 @@ fn load_notification_reports(
 ) -> Result<Vec<NotificationReport>, StoreError> {
     let mut statement = connection.prepare(
         "SELECT id, transition, status, remote_request_id, error_class
-         FROM notification_outbox WHERE run_id = ?1 ORDER BY created_at, id",
+         FROM notification_outbox WHERE run_id = ?1 ORDER BY created_at, rowid",
     )?;
     let rows = statement.query_map([run_id], |row| {
         Ok((
@@ -1330,34 +1774,30 @@ fn load_notification_reports(
 fn load_transitions(
     connection: &Connection,
     run_id: &str,
-    evaluations: &[ConditionEvaluation],
+    _evaluations: &[ConditionEvaluation],
 ) -> Result<Vec<ConditionTransition>, StoreError> {
-    let summaries: BTreeMap<_, _> = evaluations
-        .iter()
-        .map(|evaluation| (evaluation.id.as_str(), evaluation.summary.as_str()))
-        .collect();
     let mut statement = connection.prepare(
-        "SELECT n.transition, c.condition_id
-         FROM notification_outbox n
-         JOIN notification_conditions c ON c.notification_id = n.id
-         WHERE n.run_id = ?1 ORDER BY n.created_at, c.condition_id",
+        "SELECT DISTINCT n.transition, c.condition_id, c.summary FROM notification_outbox n
+         JOIN notification_conditions c ON c.notification_id = n.id WHERE n.run_id = ?1
+         ORDER BY CASE n.transition WHEN 'alert' THEN 0 ELSE 1 END, c.condition_id",
     )?;
-    let rows = statement.query_map([run_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    rows.map(|row| {
-        let (kind, condition_id) = row?;
-        Ok(ConditionTransition {
-            summary: summaries
-                .get(condition_id.as_str())
-                .copied()
-                .unwrap_or("condition transition")
-                .to_owned(),
-            condition_id,
-            kind: decode(&kind)?,
+    statement
+        .query_map([run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .map(|row| {
+            let (kind, condition_id, summary) = row?;
+            Ok(ConditionTransition {
+                condition_id,
+                kind: decode(&kind)?,
+                summary,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 fn load_notification_conditions(
@@ -1381,9 +1821,55 @@ fn parse_timestamp(value: &str) -> Result<i64, StoreError> {
         .map_err(|error| StoreError::InvalidData(format!("invalid timestamp: {error}")))
 }
 
+#[cfg(test)]
 fn schema_checksum() -> String {
-    let digest = Sha256::digest(SCHEMA.as_bytes());
-    format!("sha256:{}", sentinel_core::hex::encode(&digest))
+    schema::checksum(1)
+}
+
+fn canonical_timestamp(value: &str) -> Result<String, StoreError> {
+    let timestamp = value
+        .parse::<Timestamp>()
+        .map_err(|error| StoreError::InvalidData(format!("invalid timestamp: {error}")))?;
+    // Fixed precision makes UTC text order chronological, including whole seconds.
+    let canonical = format!("{timestamp:.9}");
+    if canonical.starts_with('-') {
+        return Err(StoreError::InvalidData(
+            "timestamps before year zero are unsupported".to_owned(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn acquire_ownership(path: &Path) -> Result<fs::File, StoreError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let database = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if database.metadata()?.nlink() != 1 {
+            return Err(StoreError::InvalidData(
+                "hard-linked state databases are unsupported".to_owned(),
+            ));
+        }
+    }
+    let canonical = fs::canonicalize(path)?;
+    let mut lock_path = canonical.into_os_string();
+    lock_path.push(".lock");
+    // SQLite's own locks conflict with flock on the database on macOS. The
+    // canonical sidecar also gives every symlink spelling the same ownership.
+    // It must remain in place: unlinking a held lock would permit a second inode.
+    let file = options.open(PathBuf::from(lock_path))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(StoreError::AlreadyInUse(path.to_path_buf())),
+        Err(fs::TryLockError::Error(error)) => Err(StoreError::Io(error)),
+    }
 }
 
 fn set_private_permissions(path: &Path) -> Result<(), StoreError> {
@@ -1427,8 +1913,16 @@ fn u32_from_i64(value: i64, label: &str) -> Result<u32, StoreError> {
     u32::try_from(value).map_err(|_| StoreError::InvalidData(format!("{label} is out of range")))
 }
 
-fn u64_from_i64(value: i64, label: &str) -> Result<u64, StoreError> {
-    u64::try_from(value).map_err(|_| StoreError::InvalidData(format!("{label} is negative")))
+fn parse_counter(value: &str, label: &str) -> Result<u64, StoreError> {
+    let count = value
+        .parse::<u64>()
+        .map_err(|_| StoreError::InvalidData(format!("{label} is outside u64")))?;
+    if count.to_string() != value {
+        return Err(StoreError::InvalidData(format!(
+            "{label} is not a canonical unsigned integer"
+        )));
+    }
+    Ok(count)
 }
 
 fn transition_order(kind: TransitionKind) -> u8 {
@@ -1452,6 +1946,10 @@ fn exit_reason(code: u8) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "reliability_tests.rs"]
+mod reliability_tests;
+
+#[cfg(test)]
 mod tests {
     use rusqlite::params;
     use sentinel_core::{NotificationStatus, OutboxMessage, TransitionKind};
@@ -1471,11 +1969,11 @@ mod tests {
     }
 
     #[test]
-    fn creates_version_one_database_with_private_permissions() {
+    fn creates_current_database_with_private_permissions() {
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("store");
-        assert_eq!(store.schema_version(), 1);
+        assert_eq!(store.schema_version(), 2);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1495,7 +1993,7 @@ mod tests {
         let store = StateStore::open(&path).expect("store");
         store
             .connection
-            .execute_batch("PRAGMA user_version = 2")
+            .execute_batch("PRAGMA user_version = 3")
             .expect("set version");
         drop(store);
         let error = StateStore::open(&path).expect_err("future schema must fail");
@@ -1542,6 +2040,13 @@ mod tests {
             )
             .expect("insert");
         store
+            .connection
+            .execute(
+                "INSERT INTO state_identity(singleton, run_mode) VALUES (1, 'dry_run')",
+                [],
+            )
+            .expect("mode binding");
+        store
             .ensure_run_mode(sentinel_core::RunMode::DryRun)
             .expect("same mode");
         let error = store
@@ -1586,6 +2091,48 @@ mod tests {
     }
 
     #[test]
+    fn pending_batches_keep_age_order_and_send_alerts_first_at_equal_times() {
+        let directory = tempdir().expect("tempdir");
+        let store = StateStore::open(&directory.path().join("state.sqlite")).expect("store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO runs(
+                   id, started_at, completed_at, mode, config_sha256, status,
+                   expected_targets, complete_targets, minimum_targets, exit_code
+                 ) VALUES ('run', ?1, ?1, 'live', 'sha256:synthetic', 'complete', 1, 1, 1, 0)",
+                ["2026-01-01T00:00:00Z"],
+            )
+            .expect("run");
+        // IDs deliberately sort the newer resolution before the alert.
+        for (id, kind, created_at) in [
+            ("z-old-resolution", "resolution", "2026-01-01T00:00:00Z"),
+            ("a-resolution", "resolution", "2026-01-01T00:05:00Z"),
+            ("z-alert", "alert", "2026-01-01T00:05:00Z"),
+        ] {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO notification_outbox(
+                       id, run_id, transition, title, message, priority, status, created_at
+                     ) VALUES (?1, 'run', ?2, 'title', '- summary', 0, 'pending', ?3)",
+                    params![id, kind, created_at],
+                )
+                .expect("outbox");
+        }
+        let pending = store
+            .pending_outbox("2026-01-01T00:05:00Z")
+            .expect("pending");
+        assert_eq!(
+            pending
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z-old-resolution", "z-alert", "a-resolution"]
+        );
+    }
+
+    #[test]
     fn retryable_notification_obeys_backoff_then_can_deliver() {
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join("state.sqlite");
@@ -1612,8 +2159,8 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO notification_conditions(notification_id, condition_id)
-                 VALUES ('notification', 'target:a:test')",
+                "INSERT INTO notification_conditions(notification_id, condition_id, episode_id, summary)
+                 VALUES ('notification', 'target:a:test', 'episode', 'summary')",
                 [],
             )
             .expect("condition");
@@ -1627,10 +2174,12 @@ mod tests {
             status: NotificationStatus::Pending,
             condition_ids: vec!["target:a:test".to_owned()],
         };
+        let attempt = store
+            .begin_notification_attempt(&message, "2026-01-01T00:00:00Z", &message.run_id)
+            .expect("begin");
         store
             .record_notification_attempt(
-                &message,
-                "2026-01-01T00:00:00Z",
+                &attempt,
                 "2026-01-01T00:00:01Z",
                 &NotificationAttemptOutcome::Retryable {
                     http_status: Some(503),
@@ -1651,10 +2200,12 @@ mod tests {
                 .len(),
             1
         );
+        let attempt = store
+            .begin_notification_attempt(&message, "2026-01-01T00:00:06Z", &message.run_id)
+            .expect("begin retry");
         store
             .record_notification_attempt(
-                &message,
-                "2026-01-01T00:00:06Z",
+                &attempt,
                 "2026-01-01T00:00:07Z",
                 &NotificationAttemptOutcome::Delivered {
                     http_status: 200,

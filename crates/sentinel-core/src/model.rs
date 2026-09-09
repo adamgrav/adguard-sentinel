@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
-pub const STATE_SCHEMA_VERSION: u32 = 1;
+pub const STATE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
@@ -265,6 +265,8 @@ pub struct ConditionState {
     pub consecutive_clear: u32,
     pub alert_delivery_state: AlertDeliveryState,
     pub last_transition_run: Option<String>,
+    #[serde(default)]
+    pub episode_id: Option<String>,
 }
 
 impl ConditionState {
@@ -281,6 +283,7 @@ impl ConditionState {
             consecutive_clear: 0,
             alert_delivery_state: AlertDeliveryState::Never,
             last_transition_run: None,
+            episode_id: None,
         }
     }
 }
@@ -349,6 +352,7 @@ pub struct ConditionTransition {
 #[serde(rename_all = "snake_case")]
 pub enum NotificationStatus {
     Pending,
+    InFlight,
     Suppressed,
     Delivered,
     Retryable,
@@ -366,6 +370,24 @@ pub struct NotificationReport {
     pub status: NotificationStatus,
     pub remote_request_id: Option<String>,
     pub error_class: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryAction {
+    Attempt,
+    Recovered,
+}
+
+/// Delivery work handled by this run, including messages from older runs.
+/// The outcome is a snapshot; a later retry does not rewrite this activity.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryActivity {
+    pub attempt_id: String,
+    pub origin_run_id: String,
+    pub action: DeliveryAction,
+    pub notification: NotificationReport,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -404,6 +426,8 @@ pub struct RunReport {
     pub findings: Vec<Finding>,
     pub transitions: Vec<ConditionTransition>,
     pub notifications: Vec<NotificationReport>,
+    #[serde(default)]
+    pub delivery_activity: Vec<DeliveryActivity>,
     pub health: RunHealth,
     pub exit: ExitReport,
 }

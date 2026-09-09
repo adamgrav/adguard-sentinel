@@ -11,7 +11,10 @@ cargo run --quiet --locked -p sentinel-cli -- print-schema run-report --version 
   > "$temporary_directory/run-report-v1.schema.json"
 cargo run --quiet --locked -p sentinel-cli -- print-schema state --version 1 \
   > "$temporary_directory/state-v1.sql"
+cargo run --quiet --locked -p sentinel-cli -- print-schema state --version 2 \
+  > "$temporary_directory/state-v2.sql"
 
 diff -u -- "$repository_root/schemas/config-v1.schema.json" "$temporary_directory/config-v1.schema.json"
 diff -u -- "$repository_root/schemas/run-report-v1.schema.json" "$temporary_directory/run-report-v1.schema.json"
 diff -u -- "$repository_root/schemas/state-v1.sql" "$temporary_directory/state-v1.sql"
+diff -u -- "$repository_root/schemas/state-v2.sql" "$temporary_directory/state-v2.sql"

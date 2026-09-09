@@ -38,6 +38,13 @@ upstream_latency_ms = 750
 [notifications]
 provider = "disabled"
 
+# To enable Pushover, set provider = "pushover" above and uncomment this table.
+# The service loads these files with the matching LoadCredential entries in
+# docs/DEPLOYMENT.md. For manual runs, use readable absolute file paths instead.
+# [notifications.pushover]
+# application_token_file = "/run/credentials/adguard-sentinel.service/pushover-application-token"
+# user_key_file = "/run/credentials/adguard-sentinel.service/pushover-user-key"
+
 [policies.home]
 protection_enabled = true
 upstream_mode = "load_balance"

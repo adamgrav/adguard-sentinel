@@ -31,6 +31,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 httpmock = "0.8"
+jsonschema = { version = "0.55", default-features = false }
 tempfile = "3.21"
 
 [lints]

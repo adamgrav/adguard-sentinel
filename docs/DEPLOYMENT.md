@@ -1,81 +1,79 @@
 # Deployment and acceptance
 
-AdGuard Sentinel runs on one monitor host and observes every configured resolver
-over the read-only API. Target resolver hosts do not need the binary installed.
+Install Sentinel on one monitor host. Resolver hosts need only expose their
+AdGuard Home API. [SUPPORT](SUPPORT.md) records supported platforms and evidence.
+Commands below use a POSIX shell on Linux; `sudo` marks host-level installation.
 
-Read `docs/SUPPORT.md` first. It states which platforms and installation methods
-have real evidence behind them and which do not.
+## Install
 
-## Build prerequisites
+### Nix
 
-Sentinel links SQLite, TLS, and the IANA time zone database into the binary, so a
-built binary needs no system SQLite, OpenSSL, or `tzdata`. Building it needs:
-
-- Rust `1.97.1`, the version pinned in `rust-toolchain.toml`. `rustup` reads that
-  file automatically inside the checkout.
-- A C compiler and linker, because SQLite is compiled from source through
-  `rusqlite`'s bundled feature. On Debian and Ubuntu, `build-essential` is
-  sufficient.
-
-No `pkg-config` module, system library, or network service is required at build
-time beyond fetching crates.
-
-## Install with Nix
-
-This is the first-class path and the only one with reproducibility guarantees.
+Build from the checkout containing the units and instructions you are using:
 
 ```sh
-nix build github:adamgrav/adguard-sentinel
-./result/bin/adguard-sentinel --help
-```
-
-From a checkout, to reproduce the full check suite as well:
-
-```sh
-nix flake check
-nix develop -c just check
 nix build
 ./result/bin/adguard-sentinel --help
 ```
 
-## Install on generic Linux from source
+For a persistent systemd installation, keep the output rooted:
+
+```sh
+sudo nix build . --out-link /opt/adguard-sentinel
+/opt/adguard-sentinel/bin/adguard-sentinel --help
+```
+
+Use `/opt/adguard-sentinel/bin/adguard-sentinel` for both binary paths through
+the override below. The package includes the canonical units under
+`share/adguard-sentinel/systemd`. An operator-owned NixOS configuration can
+reference the package directly; this repository exports no service module.
+
+### Source or Cargo
+
+Building requires Rust 1.97.1 and a C compiler/linker. `rustup` reads the pinned
+version inside the checkout. SQLite, TLS, and time-zone data are bundled; no
+system SQLite or OpenSSL development package is needed.
 
 ```sh
 git clone https://github.com/adamgrav/adguard-sentinel
 cd adguard-sentinel
 cargo build --locked --release
-install -Dm755 target/release/adguard-sentinel /usr/local/bin/adguard-sentinel
+sudo install -Dm755 target/release/adguard-sentinel /usr/local/bin/adguard-sentinel
+```
+
+Alternatively, install from that checkout into your Cargo bin directory:
+
+```sh
+cargo install --locked --path apps/sentinel-cli
 adguard-sentinel --help
 ```
 
-Keep `--locked`. It makes the build use the committed `Cargo.lock` instead of
-resolving newer dependency versions.
-
-To install a tagged release directly without keeping a checkout:
-
-```sh
-cargo install --locked --git https://github.com/adamgrav/adguard-sentinel --tag vX.Y.Z adguard-sentinel
-```
-
-This is a Git installation; Sentinel is not published to crates.io.
+`sentinel-cli` is the package name; `adguard-sentinel` is its binary. To use a
+Cargo-installed binary with the unit below, install that binary at
+`/usr/local/bin/adguard-sentinel` first. `ProtectHome=yes` prevents the service
+from using a binary under a home directory.
 
 ## Configure
 
-Start with `config.minimal.toml` for one resolver without authentication. Its URL
-is synthetic and must be replaced. Use `config.example.toml` as the complete
-reference when adding Basic authentication, policy, behavioural analysis, or
-Pushover; every `.invalid` name and RFC 5737 address in it is synthetic.
+Start with [config.minimal.toml](../config.minimal.toml), replace its URL, and
+follow the [first-observation walkthrough](../README.md#first-observation).
+For manual Basic-auth observations, use a password file readable by your user
+and keep notifications disabled. Dry-run still contacts resolvers and writes
+state; use a dedicated database.
+
+For the service, copy your configuration into a root-owned file:
 
 ```sh
-install -Dm600 config.minimal.toml /etc/adguard-sentinel/config.toml
-adguard-sentinel validate-config --config /etc/adguard-sentinel/config.toml
+sudo install -d -m755 /etc/adguard-sentinel
+sudo install -m600 config.toml /etc/adguard-sentinel/config.toml
 ```
 
-`validate-config` checks the schema, cross-references, URLs, bounds, and that
-every referenced Basic-auth or Pushover secret file exists and is non-empty. It
-contacts no network service. With `auth = "none"`, omit both `username` and
-`password_file`; Sentinel sends no `Authorization` header. Basic authentication
-keeps credentials file-only:
+The unit loads this private file with `LoadCredential=config:...` and reads its
+service-local copy through `%d/config`. A dynamic user cannot read the original
+root-owned `0600` file directly.
+
+### Basic authentication
+
+For each authenticated target, use these fields inside its `[[targets]]` table:
 
 ```toml
 auth = "basic"
@@ -83,192 +81,240 @@ username = "admin"
 password_file = "/run/credentials/adguard-sentinel.service/resolver-password"
 ```
 
-The omitted state, observation, condition-profile, and notification sections use
-the values in `config.example.toml`. The behavioural baseline and every policy
-field are opt-in. A missing policy field creates no condition rather than a
-`clear` condition.
-
-Then take one real observation before installing any service. Use a **separate**
-state path for this, because a state database is permanently bound to live or
-dry-run use after its first run. Keep the production configuration untouched and
-point a copy at a scratch database:
-
-```sh
-cp /etc/adguard-sentinel/config.toml /tmp/adguard-sentinel-dry-run.toml
-printf '\n[state]\npath = "/tmp/adguard-sentinel-dry-run.sqlite"\nretention_days = 21\n' >> /tmp/adguard-sentinel-dry-run.toml
-```
-
-Appending works only while the configuration has no `[state]` table of its own,
-which is the case for anything derived from `config.minimal.toml`. Once you have
-set your own state path — `config.example.toml` declares one — edit `state.path`
-in the copy instead. TOML rejects a second `[state]` table, so appending to such
-a file fails to parse rather than overriding anything.
-
-```sh
-adguard-sentinel check \
-  --config /tmp/adguard-sentinel-dry-run.toml \
-  --dry-run \
-  --format json
-```
-
-Note that `--dry-run` still performs real read-only requests against your
-resolvers and still writes to the state database it is pointed at. What it never
-does is load or send notification credentials. The untouched production
-configuration continues to default to `/var/lib/adguard-sentinel/state.sqlite`.
-
-Acceptance for this step is exit zero, every target complete, supported server
-versions, every configured policy condition matching, no unexpected findings,
-and a readable persisted report.
-
-## Run on a schedule with systemd
-
-Sentinel is a oneshot process, not a daemon. It is designed to be driven by a
-timer. This repository ships a binary package, not a service unit, so the units
-below are an example to adapt rather than a supported interface.
-
-`/etc/systemd/system/adguard-sentinel.service`:
-
-```ini
-[Unit]
-Description=AdGuard Sentinel read-only resolver observation
-Documentation=https://github.com/adamgrav/adguard-sentinel
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/adguard-sentinel check --config /etc/adguard-sentinel/config.toml
-DynamicUser=yes
-StateDirectory=adguard-sentinel
-StateDirectoryMode=0700
-UMask=0077
-TimeoutStartSec=120
-
-CapabilityBoundingSet=
-NoNewPrivileges=yes
-PrivateDevices=yes
-PrivateTmp=yes
-ProtectClock=yes
-ProtectControlGroups=yes
-ProtectHome=yes
-ProtectHostname=yes
-ProtectKernelLogs=yes
-ProtectKernelModules=yes
-ProtectKernelTunables=yes
-ProtectProc=invisible
-ProtectSystem=strict
-RestrictAddressFamilies=AF_INET AF_INET6
-RestrictNamespaces=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-```
-
-`/etc/systemd/system/adguard-sentinel.timer`:
-
-```ini
-[Unit]
-Description=Run AdGuard Sentinel every five minutes
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-Persistent=true
-AccuracySec=30s
-
-[Install]
-WantedBy=timers.target
-```
-
-The unit above matches `config.minimal.toml`: no resolver or notification
-credentials are loaded. When Basic authentication or Pushover is configured,
-add one `LoadCredential` line per secret. `LoadCredential` exposes each secret
-read-only under `/run/credentials/adguard-sentinel.service/<id>`, so the
-configuration should point there rather than at the file on disk:
+Store the password in `/etc/adguard-sentinel/secrets/resolver-password` and add
+this line to the unit's `[Service]` section:
 
 ```ini
 LoadCredential=resolver-password:/etc/adguard-sentinel/secrets/resolver-password
 ```
 
+Use a distinct credential ID and file for each resolver. With `auth = "none"`,
+omit both `username` and `password_file`, and omit the corresponding credential
+line.
+
+### Pushover
+
+Replace `[notifications]` with this complete configuration when you are ready
+for real alerts:
+
 ```toml
-password_file = "/run/credentials/adguard-sentinel.service/resolver-password"
+[notifications]
+provider = "pushover"
+
+[notifications.pushover]
+application_token_file = "/run/credentials/adguard-sentinel.service/pushover-application-token"
+user_key_file = "/run/credentials/adguard-sentinel.service/pushover-user-key"
 ```
 
-`StateDirectory=adguard-sentinel` gives the service a private
-`/var/lib/adguard-sentinel`, matching the default
-`state.path = "/var/lib/adguard-sentinel/state.sqlite"`. Sentinel creates the
-database with `0600` permissions.
+Add both credential lines to `[Service]`:
 
-Install and verify:
+```ini
+LoadCredential=pushover-application-token:/etc/adguard-sentinel/secrets/pushover-application-token
+LoadCredential=pushover-user-key:/etc/adguard-sentinel/secrets/pushover-user-key
+```
+
+Create the secret directory with mode `0700` and each root-owned secret file
+with mode `0600`. Enter values through an editor or your secret manager; do not
+put them in command arguments or the TOML. Each file contains only its credential
+value. The application token and user key are separate Pushover credentials.
+
+[Systemd credentials](https://systemd.io/CREDENTIALS/) exist only while the unit
+runs. Manual `validate-config` against the service configuration can therefore
+fail outside the unit. The unit's `ExecStartPre` validates it after credentials
+are loaded. Validation checks file metadata; Pushover accepts or rejects the
+values only when a message is sent. For manual runs, use readable absolute secret
+paths instead of `/run/credentials/...`.
+
+To disable notifications, use `provider = "disabled"`, remove the
+`[notifications.pushover]` table, and remove its two credential lines. A disabled
+run suppresses transitions; enabling delivery later does not replay suppressed
+alerts.
+
+## Run with systemd
+
+First check credential access on the Linux host:
 
 ```sh
-systemctl daemon-reload
-systemctl start adguard-sentinel.service
-systemctl status adguard-sentinel.service
-journalctl -u adguard-sentinel.service -n 50
-systemctl enable --now adguard-sentinel.timer
+bash tools/check-systemd-credentials.sh /usr/local/bin/adguard-sentinel
 ```
 
-Start the service manually and inspect one run before enabling the timer.
+Use your Nix binary path instead if needed. The helper starts a transient unit
+with a dynamic user, private synthetic configuration, and three dummy credential
+files. It runs only `validate-config`: no resolver requests, state writes, or
+notifications. Expect `configuration is valid`, a successful unit exit, and
+`PASS`. If it fails, stop before installing the real service and inspect the
+diagnostic. This check requires Linux/systemd and is not exercised by local
+macOS checks or the Rust suite.
 
-Leave `--fail-on` at its default. A finding is a statement about your resolvers,
-not about whether Sentinel executed correctly, and raising `--fail-on` makes the
-unit fail on ordinary findings.
-
-### Other schedulers
-
-Only the systemd path above has been exercised. Cron, runit, s6, container
-schedulers, and manual invocation are **not supported for the MVP**. Sentinel
-itself is an ordinary oneshot process, so it will probably work under any of
-them, but nothing in this repository establishes the credential handling, state
-directory permissions, or timing behaviour on those paths.
-
-## Inspect and remove
+Install the [canonical service](../deploy/systemd/adguard-sentinel.service) and
+[timer](../deploy/systemd/adguard-sentinel.timer) from the same checkout as the
+binary:
 
 ```sh
-adguard-sentinel report --state /var/lib/adguard-sentinel/state.sqlite --limit 5
-adguard-sentinel report --state /var/lib/adguard-sentinel/state.sqlite \
-  --limit 1 --format json
+sudo install -m644 deploy/systemd/adguard-sentinel.service /etc/systemd/system/
+sudo install -m644 deploy/systemd/adguard-sentinel.timer /etc/systemd/system/
 ```
 
-To remove Sentinel completely:
+For a rooted Nix package without a checkout, use
+`/opt/adguard-sentinel/share/adguard-sentinel/systemd/` as the source directory.
+The service uses `/usr/local/bin/adguard-sentinel` by default. For Nix, create
+`/etc/systemd/system/adguard-sentinel.service.d/binary.conf`:
+
+```ini
+[Service]
+ExecStartPre=
+ExecStartPre=/opt/adguard-sentinel/bin/adguard-sentinel validate-config --config %d/config
+ExecStart=
+ExecStart=/opt/adguard-sentinel/bin/adguard-sentinel check --config %d/config
+```
+
+Create the drop-in directory with mode `0755` and files with mode `0644`. Add
+any Basic or Pushover `LoadCredential` lines described above in a separate
+`credentials.conf` drop-in with a `[Service]` section. The default state path
+matches `StateDirectory`, which supplies private writable storage. The service
+uses a dynamic user, mode `0700` state storage, umask `0077`, a read-only system,
+restricted system calls and capabilities, and a 120-second start deadline.
+Leave `--fail-on` at `never`; ordinary findings should not fail the unit. Set
+`TimeoutStartSec` in a drop-in if your target count and request/notification
+timeouts require more than 120 seconds.
+
+This monotonic timer runs after boot and then relative to the previous
+activation. It does not replay checks missed while the host was off. Systemd
+does not start a second instance of an already active oneshot. A manual `check`
+against the same database is also refused while a writer holds it, with exit `5` and
+`state database is already in use`. Read-only `report` remains available.
+
+Validate the units, then start one observation before enabling the timer:
 
 ```sh
-systemctl disable --now adguard-sentinel.timer
-systemctl stop adguard-sentinel.service
-rm /etc/systemd/system/adguard-sentinel.service /etc/systemd/system/adguard-sentinel.timer
-systemctl daemon-reload
-rm -rf /var/lib/adguard-sentinel /etc/adguard-sentinel
-rm /usr/local/bin/adguard-sentinel
+sudo systemd-analyze verify /etc/systemd/system/adguard-sentinel.service /etc/systemd/system/adguard-sentinel.timer
+sudo systemctl daemon-reload
+sudo systemctl start adguard-sentinel.service
+sudo systemctl show adguard-sentinel.service -p Result -p ExecMainStatus
+sudo journalctl -u adguard-sentinel.service -n 50 --no-pager
 ```
 
-Removing the state directory discards observation history and every latch, so a
-reinstall starts a fresh behavioural baseline.
+Expect `Result=success`, `ExecMainStatus=0`, and a complete observation of each
+target with no unexpected findings. A successful oneshot normally becomes
+`inactive (dead)`; that alone is not failure. Once the first run is accepted:
 
-## Isolated alert and recovery exercise
+```sh
+sudo systemctl enable --now adguard-sentinel.timer
+systemctl list-timers adguard-sentinel.timer --all
+```
 
-Use a second dry-run state database and a one-target configuration. Set API
-availability sustain to one, point the target at an unused loopback port, and run
-once. Expect an incomplete target, an API-unavailable finding, a suppressed
-alert transition, and exit three. Restore the same target ID to a real read-only
-API URL and run again. Expect a complete observation and a suppressed
-resolution.
+## Automated synthetic acceptance
 
-This exercises the packaged state machine without changing a resolver. Real
-notification delivery requires a separately arranged test route.
+The [acceptance harness](../tools/check-linux-deployment.py) creates a loopback
+mock with synthetic responses and temporary state. It accepts a binary path;
+there is no option for a real resolver or notification destination:
 
-## Service acceptance
+```sh
+python3 tools/check-linux-deployment.py --binary target/debug/adguard-sentinel
+```
 
-Require twelve consecutive successful timer runs, one service restart, growing
-SQLite history, clean journald output, and successful external job-health events
-if a job-health monitor is configured.
+This portable mode checks Basic authentication, all six allowlisted GETs,
+private state and repeated runs, malformed data, HTTP failure, request timeout,
+suppressed alert/recovery, and concurrent writer refusal while reports remain
+readable. It does not test systemd.
 
-If Sentinel replaces an existing monitor, keep that monitor's definition and
-state available but disabled for an initial rollback window, and never run two
-notification-producing monitors against the same targets at the same time.
-Rollback stops the Sentinel timer, restores the previous unit selection and
-job-health target, and verifies one successful run.
+On a **disposable Linux host with systemd**, run the complete service suite:
+
+```sh
+sudo python3 tools/check-linux-deployment.py --binary target/debug/adguard-sentinel --systemd --disposable
+```
+
+It copies the canonical units unchanged, then uses drop-ins for unique temporary
+paths, the test binary, synthetic credentials, and accelerated timing. It checks
+credential access under `DynamicUser`, read-only system mounts, effective
+capabilities, syscall/address-family restrictions, state permissions, a missing
+credential, validation of both Pushover credential files without delivery,
+process termination at the systemd deadline, restart after termination, and two
+recurring timer activations. It also migrates v1 state under the service user,
+checks private backup/lock ownership, and uses that state through the canonical
+service. Runtime units and isolated state are removed on exit. Do not run this
+root-level suite on a production monitor.
+
+[CI](../.github/workflows/ci.yml) runs this suite against both native Linux Nix
+packages and the source-built Ubuntu binary. A configured job is not a passing
+result: inspect CI for the exact commit. These synthetic checks do not establish
+real credentials, resolver reachability, five-minute scheduling, job-health
+integration, or Pushover delivery.
+
+## Inspect and accept
+
+Use your installed binary path; the source-install example is:
+
+```sh
+sudo /usr/local/bin/adguard-sentinel report --state /var/lib/adguard-sentinel/state.sqlite --limit 5
+```
+
+For a new deployment, require twelve successful timer runs, one service restart,
+growing history, and any configured external job-health events. A five-minute
+timer includes scheduling slack; allow for it in the job-health grace period.
+Build and fixture tests cannot establish these host properties.
+
+For an isolated alert/recovery exercise, use a separate dry-run configuration
+and database with one target. Copy the full condition profile from the example,
+set `api_unavailable_sustain_runs = 1` and `recovery_runs = 1`, and point the
+target at an unused loopback port. Run `check --dry-run`: expect exit `3`, an
+API-unavailable finding, and a suppressed alert transition. Restore the same
+target ID to its working read-only API URL and run again: expect exit `0` and a
+suppressed resolution. This does not establish real Pushover delivery; test that
+only on a separately authorized route.
+
+When replacing an existing monitor, disable its notifications before enabling
+Sentinel's. Keep its definition and state during a rollback window. Rollback
+stops Sentinel's timer, restores the previous monitor and job-health target, and
+verifies one successful run. For binary upgrades, read the changelog before
+assuming an older binary can read newly written state.
+
+## Upgrade state
+
+Read the changelog for the installed and target versions. A binary that requires
+a newer state schema refuses an older database until an explicit migration;
+`check` never performs that upgrade. Stop scheduling and wait for the active
+writer before copying or migrating state:
+
+```sh
+sudo systemctl stop adguard-sentinel.timer adguard-sentinel.service
+sudo cp -a /var/lib/adguard-sentinel/state.sqlite /var/lib/adguard-sentinel/state.sqlite.before-upgrade
+sudo systemd-run --unit=adguard-sentinel-migration --wait --pipe --collect \
+  --property=DynamicUser=yes --property=User=adguard-sentinel \
+  --property=StateDirectory=adguard-sentinel --property=StateDirectoryMode=0700 \
+  --property=UMask=0077 --property=PrivateNetwork=yes \
+  /usr/local/bin/adguard-sentinel migrate-state --state /var/lib/adguard-sentinel/state.sqlite
+sudo systemctl start adguard-sentinel.service
+sudo systemctl show adguard-sentinel.service -p Result -p ExecMainStatus
+```
+
+Use the new binary's path for migration, including the Nix path when applicable.
+The transient unit uses the canonical service's user and state directory, so the
+new lock and backup have the correct ownership. If the service overrides `User`
+or `StateDirectory`, use those values. Running migration directly as root can
+leave a root-owned lock that the dynamic service user cannot open.
+Keep the backup private. Accept the first run before restarting the timer. A
+failed migration must leave the original database usable; retain the backup
+until the rollback window ends. Binary rollback may also require restoring its
+matching state backup while the timer and service are stopped.
+
+## Remove
+
+The following removes a source or Cargo installation, its configuration, and
+all history and latches:
+
+```sh
+sudo systemctl disable --now adguard-sentinel.timer
+sudo systemctl stop adguard-sentinel.service
+sudo rm /etc/systemd/system/adguard-sentinel.service /etc/systemd/system/adguard-sentinel.timer
+sudo rm -rf /etc/systemd/system/adguard-sentinel.service.d
+sudo systemctl daemon-reload
+sudo rm -rf /var/lib/adguard-sentinel /etc/adguard-sentinel
+sudo rm /usr/local/bin/adguard-sentinel
+```
+
+With `DynamicUser`, the state may live under `/var/lib/private/adguard-sentinel`;
+remove that directory too when discarding the history. For the Nix installation,
+remove the `/opt/adguard-sentinel` output link instead of the binary; Nix garbage
+collection can later reclaim the package. A reinstall without state starts new
+latches and a new behavioral baseline.

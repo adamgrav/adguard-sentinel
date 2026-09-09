@@ -1,38 +1,48 @@
 # Versioning and releases
 
-How AdGuard Sentinel is versioned and released. For what changed in each
-release, see [CHANGELOG.md](CHANGELOG.md).
+Release tags use `vMAJOR.MINOR.PATCH`. [CHANGELOG.md](CHANGELOG.md) records
+changes and upgrade requirements; an `Unreleased` entry has not shipped.
 
-Sentinel follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
-the pre-1.0 caveat that a minor bump may break compatibility. Read the changelog
-before upgrading.
+## Compatibility
 
-Four things are versioned independently, and only the first is the release
-number:
+Sentinel is pre-1.0 with no external users. Run-report fields may be removed,
+renamed, retyped, or change vocabulary or meaning in a patch or minor release
+without a schema-version bump. This flexibility is intentional. Record each
+change in the changelog and update generated schemas when types change; do not
+introduce report versions solely to enforce a compatibility promise that begins
+at 1.0.
 
-| Surface | Versioned by | Compatibility rule |
-| --- | --- | --- |
-| The binary and CLI | The release tag | Pre-1.0: a minor bump may change flags or output |
-| Configuration | `schema_version` in the TOML | A new schema version is a breaking change and gets a new number |
-| Run report JSON | `schema_version` in the report | Additive fields may appear in a patch release; removals and type changes require a new version. Pre-1.0 caveat: a field may also be renamed or its value vocabulary changed in a patch, called out in the changelog, because the alternative is carrying a known-wrong interface to 1.0 |
-| SQLite state | `PRAGMA user_version` | Upgraded only by `migrate-state`, never implicitly by `check` |
+The current report changes follow this policy. Existing SQLite v1 databases
+require explicit migration to v2 before this checkout can read them. Historical
+report interpretation is documented in
+[SCHEMAS](docs/SCHEMAS.md#historical-reports).
 
-Consequences worth knowing:
+At 1.0, report compatibility becomes a commitment: additive changes may retain
+a schema version; incompatible changes require a new one. The binary/CLI follows
+pre-1.0 semantic versioning, where a minor bump may break compatibility.
+Configuration uses its own `schema_version`; a new configuration schema gets a
+new number. SQLite uses `PRAGMA user_version`. These versions are independent
+of the binary release.
 
-- `check` never migrates state. A newer binary meeting older state exits `5` and
-  tells you to run `migrate-state`, so an upgrade cannot silently rewrite
-  history.
-- The supported AdGuard Home API range is part of the compatibility surface.
-  Widening it needs evidence against the new version and is at least a minor
-  bump.
-- Anything `docs/SUPPORT.md` marks **Pending** or **Expected** is not a
-  compatibility promise.
+SQLite upgrades are always explicit. `check` never migrates existing state;
+[MIGRATION](docs/MIGRATION.md) describes the current command. A supported
+AdGuard Home range must have evidence recorded in [SUPPORT](docs/SUPPORT.md).
+The operator's explicit untested-range override is not a support claim.
 
-### Release process
+## Release checklist
 
-Releases are tagged `vMAJOR.MINOR.PATCH` from `main` after both CI jobs pass. A
-tag is only created once its acceptance evidence exists, so a green tag means the
-package built and the suite ran, not that a deployment was validated.
+1. Finish and date the changelog entry for the planned release. Update any
+   configuration, behavior, schema, or support documentation affected. For the
+   current v2 state change, review migration and rollback acceptance.
+2. Set the release version in the workspace, internal crate requirements, and
+   `flake.nix`, and update the pinned installation examples. Regenerate
+   `Cargo.lock` with Cargo; do not edit it by hand.
+3. Run `nix develop -c just check`. Review the diff and any deployment acceptance
+   needed for changed runtime or installation behavior.
+4. After the release changes are merged, verify that CI passes on that `main`
+   commit: both native Linux Nix jobs and the rustup source-build job.
+5. With explicit authorization, create the tag and release from the reviewed
+   release commit. Verify its version, date, commit, and notes before publishing.
 
-The release date is filled in at tag time; an entry marked "unreleased" has not
-shipped.
+A green build establishes package and test results, not live resolver, timer,
+or notification acceptance. Releases currently contain source only.

@@ -2,9 +2,9 @@
 
 AdGuard Sentinel is a read-only monitor for independent AdGuard Home resolvers.
 It retrieves a fixed set of operational and declared-policy data, rejects
-malformed or unsupported responses, persists bounded history, applies sustained
-alert and recovery latches, and emits versioned reports and optional Pushover
-notifications.
+malformed or unsupported responses, retains observation and delivery evidence,
+applies sustained alert and recovery latches, and emits versioned reports and
+optional Pushover notifications.
 
 ## Invariants
 
@@ -23,7 +23,9 @@ notifications.
 - Dry-run performs real read-only observations and evolves its selected state
   database, but never loads or sends notification credentials.
 - A state database is permanently bound to live or dry-run observations after
-  its first run, preventing a dry-run from advancing live latches.
+  its first run, even after history is pruned.
+- One writer owns observation through delivery; reports read committed snapshots.
+- Possibly transmitted notifications are quarantined, never automatically replayed.
 - SQLite is private runtime state. Versioned JSON is the automation interface.
 - There is no telemetry.
 
@@ -32,10 +34,10 @@ notifications.
 1. Validate version-1 TOML without network access.
 2. Run a dry observation and inspect human or JSON output.
 3. Install a recurring systemd oneshot on the monitor host. This repository
-   ships a binary package, not a service module.
+   ships a binary package and example units.
 4. Receive one alert after a sustained condition.
 5. Receive one quiet resolution only after a confirmed delivered alert.
-6. Inspect bounded resolver, upstream, policy, finding, and notification history.
+6. Inspect resolver, upstream, policy, finding, and notification history.
 7. Run explicit state migrations before a newer binary uses old state.
 
 ## Success

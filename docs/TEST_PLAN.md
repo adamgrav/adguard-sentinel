@@ -1,165 +1,82 @@
-# Test plan
+# Test coverage
 
-This page maps what the suite actually covers, boundary by boundary, and marks
-where it does not. `just test` is authoritative for what runs; every test here is
-deterministic and contacts no live AdGuard Home or Pushover service.
+`nix develop -c just check` runs formatting, Clippy, tests, build, schema drift,
+documentation, and supply-chain checks. `just test` runs the Rust suite. Tests
+use synthetic fixtures and local mock servers; none contacts a live AdGuard Home
+or Pushover service. [PROVENANCE](../testdata/PROVENANCE.md) records fixture sources and time.
 
-Rows are marked *thin* where a representative test exists but not the full case
-matrix, and *absent* where no test exists yet. Those markers are the useful part:
-a coverage map that only listed strengths would be marketing.
+## Coverage by boundary
 
-## AdGuard request boundary
+| Boundary | Covered behavior | Source |
+| --- | --- | --- |
+| AdGuard transport | Six fixed GETs; Basic and no-auth headers; unsupported versions; rejected auth; redirects; failed, oversized, malformed, or timed-out responses; aborting later requests after failure | [sentinel-adguard](../crates/sentinel-adguard/src/lib.rs) |
+| Response decoding | Required fields, invalid counters and latency, duplicate clients/upstreams/filters/rewrites, legacy load-balance alias, filter timestamps, and unknown extra fields | [sentinel-adguard](../crates/sentinel-adguard/src/lib.rs) |
+| Configuration | Minimal no-auth configuration, default sections, Basic compatibility, required credentials, optional policy fields, and rejection of unknown fields | [config](../crates/sentinel-core/src/config.rs) |
+| Policy | Independent declarations, normalized identities, required filter/rewrite drift, global rewrite dependency, all protection combinations, stable kinds, and clear summaries | [analysis](../crates/sentinel-core/src/analysis.rs) |
+| Behavioral measurements | Counter resets, long gaps, integer differences, rate threshold equality, collapse detection, complete historical groups, duplicate members, same-second ordering, and historical/current sum overflow | [analysis](../crates/sentinel-core/src/analysis.rs) |
+| Behavioral populations | Window-based readiness, independent rate/ratio populations, per-target conditions, low-query windows, and specific not-evaluated reasons | [analysis](../crates/sentinel-core/src/analysis.rs) |
+| Latches | Sustain/recovery, frozen not-evaluated state, retained withdrawn declarations, stable identity across presentation changes, and one alert/resolution per episode | [analysis](../crates/sentinel-core/src/analysis.rs), [CLI](../apps/sentinel-cli/src/main.rs) |
+| Persistence | Private creation and v1 backup, checksummed migration, unsupported-version refusal, migration/write-failure rollback, durable live/dry-run binding, unsigned counters, legacy precision barriers, inclusive retention, and retained unresolved delivery evidence | [store](../crates/sentinel-store/src/store.rs), [reliability tests](../crates/sentinel-store/src/reliability_tests.rs) |
+| Time and cooldowns | Both Amsterdam DST edges, fractional/offset timestamp ordering and filtering, observation/delivery clock regression, and auth cooldown without requests | [analysis](../crates/sentinel-core/src/analysis.rs), [reliability tests](../crates/sentinel-store/src/reliability_tests.rs), [process tests](../apps/sentinel-cli/src/crash_tests.rs) |
+| Notification transport | Success requires status and request ID; retryable/permanent/unknown outcomes; timeouts and oversized responses; fixed payload fields; credential exclusion; no resend after ambiguity | [notification adapter](../apps/sentinel-cli/src/notify.rs), [CLI](../apps/sentinel-cli/src/main.rs) |
+| Delivery state | Complete batch membership, oversized Unicode summaries, partial recovery, preserved backoff, recurrence cancellation, episode guards, and conservative legacy delivery migration | [reliability tests](../crates/sentinel-store/src/reliability_tests.rs) |
+| Process ownership | Overlapping live/dry writers, symlink aliases, concurrent read-only reporting, killed senders before/after response completion, recovery without resend, and ownership release after death | [reliability tests](../crates/sentinel-store/src/reliability_tests.rs), [process tests](../apps/sentinel-cli/src/crash_tests.rs) |
 
-- Every observation is one of the six allowlisted GETs, and no other path is
-  requested.
-- Unknown response fields are ignored, as ADR 0003 permits for
-  forward-compatible patch releases.
-- The legacy `upstream_mode = ""` alias normalizes to `load_balance`, an
-  explicit mode is preserved unchanged, and whitespace is not the alias.
-- Observations fail closed on a redirect, a non-success status, rejected
-  authentication, an unsupported version, a stopped server, a malformed body, a
-  missing required field, an oversized body, and a request timeout.
-- `auth = "none"` is matched only when every allowlisted request omits the
-  `Authorization` header; the compatibility test for Basic authentication
-  requires the prior header value on all six requests.
-- Statistics fail closed on negative processing time, a blocked count above the
-  query count, and a duplicated client identity.
-- Declared data fails closed on a duplicated upstream set, a duplicated filter
-  URL, a required filter updated in the future, an enabled required filter with
-  no update time, rewrites that collide after normalization, and an empty
-  rewrite domain.
-- A failed endpoint aborts that target's remaining requests.
-- Proxy environment inheritance is disabled unconditionally in
-  `ReqwestAdGuardClient::new`. That is a structural property rather than a test:
-  asserting it would require mutating process environment variables, which this
-  workspace's `unsafe_code = "forbid"` prevents.
+Proxy inheritance is disabled structurally by `.no_proxy()`; there is no test
+that launches the client under hostile proxy environment variables.
+Configuration validation has representative cases, not an exhaustive bounds and
+cross-reference matrix.
 
-## Policy evaluation
+## CLI and reports
 
-- Required rewrites match after domain and answer normalization, and their
-  condition identifiers do not depend on declared spelling, so latches survive a
-  configuration reformat.
-- A disabled required rewrite, a required rewrite answered differently, an
-  absent required rewrite, and a disabled global rewrite setting are each drift.
-- Filters and rewrites outside declared policy never produce a finding.
-- A target with no policy emits no policy evaluations, and a policy with an
-  upstream mode but no upstream set emits no `upstream_set` evaluation.
-- A required rewrite is `globally_disabled` rather than clear when the resolver's
-  rewrite switch is off or unreadable and the policy did not declare it, while a
-  rewrite declared `enabled = false` stays clear.
-- Protection is judged against the declared value across all four
-  declared-versus-observed combinations, and `reason` still names the observed
-  state.
-- Required filter absence, state drift, and staleness at the configured age are
-  detected.
-- One condition id keeps one `kind` across all four filter outcomes and across a
-  reachable and an unreachable target, and only `reason` varies.
-- Every evaluation of a fully compliant target is clear and no clear summary
-  contains the failure phrasing it ruled out.
-- Latency comparisons are strictly greater-than at their exact boundary.
-- Configuration schema, size, cross-reference, URL, duration, and secret-file
-  validation. The checked-in minimal configuration validates with only one
-  no-auth target; the full example equals the generated defaults; a one-field
-  policy validates. *thin*
+CLI tests exercise exit `0` for healthy runs, `1` for matching `--fail-on`
+severity, `2` for invalid configuration or report arguments, `3` for no complete
+target, `4` for retryable/ambiguous notification attempts, and `5` for state and
+clock errors. They also cover omitted behavioral configuration and v0.1.3 target
+evaluation compatibility.
 
-## Behavior and state
+The [public contract tests](../apps/sentinel-cli/tests/contracts.rs) recursively
+validate actual CLI output against JSON Schema, reject invalid nested data,
+compare parsed JSON/JSONL with persisted reports, and check an incomplete group
+whose complete member still has independent evaluations. The validator refuses
+external references. The schema drift check separately compares generated files.
+Older evaluation field names and the missing `reason` default have dedicated
+[model tests](../crates/sentinel-core/src/model.rs).
 
-- Alerts latch once and resolve once. A not-evaluated outcome freezes a firing
-  latch without advancing or clearing it.
-- A firing, delivered latch fed a renamed kind, reason, and summary emits no
-  transition, keeps its lifecycle and delivery state, continues its counter
-  rather than restarting it, and keeps its first-observed timestamp.
-- Withdrawing a policy declaration removes its condition from the report without
-  resolving it, and restoring the declaration resumes the retained firing latch
-  rather than alerting a second time.
-- Aggregate thresholds are clear at equality and active above it.
-- SQLite creation with private permissions, refusal of a newer schema, rollback
-  after an interrupted transaction, live and dry-run state binding, retention at
-  the inclusive cutoff, and notification backoff before delivery.
-- An evaluation persisted by 0.1.0 still deserializes, with the pre-rename
-  counter names honoured and `reason` defaulted, so `report` keeps working
-  against an existing state database. The current field names round-trip.
-- Injected time covers both Amsterdam DST edges.
-- A regressed wall clock fails before the run is recorded, leaving the earlier
-  run as the only persisted one.
-- Learning-boundary time injection. *absent*
-- A rejected password records a cooldown, the next run inside it makes no AdGuard
-  request at all, a later run resumes observation, and a complete observation
-  clears the cooldown rather than letting it merely expire.
-- Notification batching order and the rule that a behavior group advances only
-  when every member is complete. *absent*
+[Rendering tests](../apps/sentinel-cli/src/render.rs) distinguish learning,
+unavailable and low-traffic windows, incomplete observations, sustain/recovery
+progress, and delivery activity originating in older runs. `--explain` is also
+exercised through the CLI.
 
-## CLI
+`just doc-check` checks tracked public Markdown links, anchors, and shell syntax;
+it executes the README walkthrough and validates documented configurations using
+synthetic files and a loopback resolver. It does not execute installation commands.
 
-Exit codes are the systemd and job-health contract, so each one is exercised
-end to end through `check` with an injected clock and a mock AdGuard server.
+## Notification regressions
 
-| Code | Covered by |
-| --- | --- |
-| `0` | A healthy run with no findings and no transitions |
-| `1` | An active warning with `--fail-on warning`, and *not* with `--fail-on error` |
-| `2` | An unparseable configuration, a zero or oversized report limit, `--format json` with more than one report, and an invalid `--since` |
-| `3` | An unreachable target leaving zero complete targets |
-| `4` | A retryable Pushover response, and an ambiguous one |
-| `5` | A regressed wall clock, and an absent state database |
+- `enabling_notifications_does_not_resolve_a_suppressed_alert` persists an alert
+  with delivery disabled, enables delivery, observes recovery without sending,
+  and verifies that a new episode can alert normally through a mock provider.
+- `dry_and_disabled_runs_keep_simulated_resolutions` retains the dry-run and
+  disabled-provider acceptance behavior.
+- `pending_batches_keep_age_order_and_send_alerts_first_at_equal_times` verifies
+  that older work stays first and equal-time alert batches precede resolutions.
 
-Every documented code also has a distinct reason string.
+## Remaining gaps
 
-- A dry run never loads notification credentials, and its run is recorded in
-  dry-run mode.
-- A run with no behavioral baseline persists no aggregate observation and emits
-  no aggregate conditions.
-- A configuration in the v0.1.3 shape still validates and produces the same
-  target condition identifiers, kinds, reasons, and clear outcomes.
-- Pushover classification for confirmed success and for retryable versus
-  permanent HTTP failures, at the unit level and through a mock endpoint.
-- A confirmed delivery records the remote request identifier.
-- An ambiguous delivery is recorded as unknown and is never resent on a later
-  run, because the outbox only re-selects pending and retryable rows.
-- A request carries exactly the declared Pushover fields: the application token,
-  the user key, a title, a message, and a priority.
-- A sustained condition alerts at normal priority, its recovery resolves once at
-  quiet priority `-1`, and a third healthy run sends nothing further.
-- No credential reaches a persisted report. Distinct sentinel secrets are
-  asserted absent from the serialized report for both a permanently rejected
-  notification and a rejected AdGuard password, along with any `Basic ` header
-  material.
-- A persisted report carries every property the checked-in run-report schema
-  requires, declares no property the schema does not, pins both schema versions
-  to `1`, and round-trips back through `RunReport`. Because the schema is
-  generated from those types and `just schema-check` proves it has not drifted,
-  and because every report type denies unknown fields, a round trip is
-  equivalent to validation without adding a JSON Schema validator dependency.
-- Golden byte-for-byte JSON and JSONL output. *absent*
-- Migration tests per released schema version. *absent*; v1 has no predecessor.
+- Exact learning-age boundary tests and a full configuration-boundary matrix.
+- JSON/JSONL byte-for-byte goldens; current checks compare parsed values.
+- Power-loss and filesystem failure behavior beyond SQLite write-failure injection.
 
-## Notification transport
+The [Linux acceptance harness](../tools/check-linux-deployment.py) exercises
+the shipped units in a disposable systemd environment: credentials, private
+state, hardening, timeout/restart, overlap, timer activation, and migration as
+the service user. Its CLI-only mode also runs on macOS. The existence of this
+harness or a passing macOS run
+does not prove native systemd execution; use CI results and
+[SUPPORT](SUPPORT.md) for recorded platform evidence.
 
-Delivery outcomes separate "definitely not sent" from "possibly sent", which is
-what ADR 0006 rests on. A refused connection before any response is retryable. A
-timeout after transmission, and an oversized response body, are both ambiguous
-and therefore never resent automatically.
-
-`PushoverClient::from_config` is the only constructor reachable outside tests and
-always uses the fixed production endpoint. A `#[cfg(test)]` constructor accepts
-an endpoint so delivery can be exercised against a mock server; it does not
-exist in a release build. `check_with_sink` accepts an already-built client for
-the same reason, and the production path passes `None`, which preserves the rule
-that credentials are read only when a message is actually pending.
-
-## Fixtures
-
-`testdata/PROVENANCE.md` records every fixture, its purpose, and the reference
-instant that timestamped fixtures are relative to. The golden set describes one
-healthy resolver matching the declared `home` policy in `config.example.toml`, so
-those two files are asserted against each other and cannot drift apart silently.
-
-## Live acceptance outside this repository
-
-The test suite contacts no live AdGuard Home or Pushover service, so it cannot
-prove a deployment. Live acceptance is the operator's responsibility and
-requires a real package build on the monitor host, one successful read-only
-observation of every configured target, an isolated alert/recovery exercise, and
-twelve consecutive successful timer runs. Service installation, external
-job-health reporting, real notification delivery, and rollback are owned by the
-host configuration, not by this repository. See `docs/DEPLOYMENT.md`.
+Live resolver, timer, job-health, and real notification acceptance follows
+[DEPLOYMENT](DEPLOYMENT.md#inspect-and-accept). Behavioral calibration supports
+the maintainer's recorded traffic and synthetic injections, not universal
+false-positive or detection rates; see [ADR 0012](decisions/0012-behavioral-conditions-measure-rates.md#evidence-and-limits).

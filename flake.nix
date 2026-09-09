@@ -58,6 +58,12 @@
             src = cleanSource;
             cargoLock.lockFile = ./Cargo.lock;
             doCheck = true;
+            postInstall = ''
+              install -Dm644 deploy/systemd/adguard-sentinel.service \
+                $out/share/adguard-sentinel/systemd/adguard-sentinel.service
+              install -Dm644 deploy/systemd/adguard-sentinel.timer \
+                $out/share/adguard-sentinel/systemd/adguard-sentinel.timer
+            '';
             meta = {
               description = "Read-only operational and policy monitoring for AdGuard Home";
               license = with pkgs.lib.licenses; [
@@ -95,6 +101,7 @@
               pkgs.git
               pkgs.just
               pkgs.nixfmt
+              pkgs.python3
               rustToolchain
             ];
           };

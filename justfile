@@ -20,8 +20,12 @@ build:
 schema-check:
   bash tools/check-schemas.sh
 
+doc-check:
+  cargo build --quiet --locked -p sentinel-cli
+  python3 tools/check-docs.py
+
 # Requires network access to refresh the RustSec advisory database.
 supply-chain:
   cargo deny --locked check advisories licenses bans sources
 
-check: fmt-check lint test build schema-check supply-chain
+check: fmt-check lint test build schema-check doc-check supply-chain

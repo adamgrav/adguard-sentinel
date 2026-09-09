@@ -15,24 +15,37 @@ apps/
 
 ```text
 TOML validation
+  -> exclusive state ownership and live/dry-run check
   -> optional secret-file loading
   -> bounded target observation
   -> strict response normalization
   -> per-target operational and declared-policy evaluation
-  -> optional explicit-group behavioral evaluation
+  -> optional per-target and explicit-group behavioral evaluation
   -> atomic run/state/outbox transaction
-  -> notification delivery after commit
+  -> durable attempt claim, then notification delivery
+  -> atomic attempt result and episode delivery update
   -> versioned report and exit status
 ```
 
 Targets are observed concurrently under one semaphore. Requests within one
 target are sequential and can only call typed GET methods. Target data is not
-combined except for the configured query-volume and blocked-ratio baseline.
+combined except for the configured group's query-rate, blocked-ratio, and
+blocking-collapse evaluations. Group members also have independent behavioral
+evaluations.
 
 The store persists normalized observations and condition state. A completed run
 is inserted with its evaluations, latch changes, pruning, and notification
-intents in one transaction. Network notification attempts happen only after
-that commit and use short result transactions.
+intents in one transaction. Each send first commits an `in_flight` attempt;
+its result and episode delivery state then commit atomically. An unfinished
+attempt is quarantined on the next check. Origin-owned notification records
+and executing-run delivery snapshots remain separate.
+
+A canonical adjacent `.lock` file excludes other writers for the entire
+observation and delivery operation, including access through symlink aliases.
+Read-only reports use a SQLite snapshot and do not take writer ownership.
+The lock file stays in place when ownership is released. SQLite v2 stores
+unsigned counters losslessly and binds live/dry-run mode independently of run
+retention. [MIGRATION](MIGRATION.md) owns upgrades and backups.
 
 The CLI is the only application boundary. Domain errors remain typed below it.
 Clocks, the AdGuard reader, notification sink, and state repository are

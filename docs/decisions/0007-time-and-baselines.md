@@ -2,7 +2,12 @@
 
 Status: accepted.
 
-Wall and monotonic time are injectable. Stored timestamps are UTC RFC3339;
-baseline hour classification uses the configured IANA zone. A regressed wall
-clock does not advance or prune state. Repeated DST hours share their wall-hour
-bucket and skipped hours produce no samples, as defined by the behavior contract.
+Wall and monotonic time are injectable. V2 normalizes stored timestamps to UTC
+RFC3339 with nine fractional digits, making lexical ordering chronological
+across fractional seconds and equivalent offsets. Observation commits and
+delivery attempts check for clock regression.
+
+Baseline hour classification uses the configured IANA zone. Repeated DST hours
+share their wall-hour bucket and skipped hours produce no samples.
+[BEHAVIOR](../BEHAVIOR.md#latches-time-and-retention) owns the time and retention
+rules.

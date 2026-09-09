@@ -7,6 +7,9 @@
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite-journal
+*.sqlite.lock
+*.sqlite.v1-*.bak
 *.tmp
 .DS_Store
 /.claude/
