@@ -18,17 +18,17 @@ only the declared behaviour group aggregates observations.
 
 ## Install
 
-Build from the checkout containing these instructions. With Nix:
+Install v0.4.0 with Nix:
 
 ```sh
-nix build
+nix build github:adamgrav/adguard-sentinel/v0.4.0
 ./result/bin/adguard-sentinel --help
 ```
 
 With Rust 1.97.1 and a C compiler:
 
 ```sh
-cargo install --locked --path apps/sentinel-cli
+cargo install --locked --git https://github.com/adamgrav/adguard-sentinel --tag v0.4.0 sentinel-cli
 adguard-sentinel --help
 ```
 
