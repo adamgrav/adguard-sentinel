@@ -378,6 +378,10 @@ AccuracySec=100ms
         seed = self.directory / "seed-legacy.py"
         seed.write_text(LEGACY_SEED)
         seed.chmod(0o644)
+        # The dynamic user cannot necessarily traverse the runner's checkout.
+        legacy_schema = self.directory / "state-v1.sql"
+        shutil.copyfile(ROOT / "schemas/state-v1.sql", legacy_schema)
+        legacy_schema.chmod(0o644)
 
         def transient(suffix, *args):
             unit = f"{self.name}-{suffix}.service"
@@ -391,7 +395,7 @@ AccuracySec=100ms
             )
 
         transient("legacy-seed", "/usr/bin/python3", seed,
-                  ROOT / "schemas/state-v1.sql", legacy_state)
+                  legacy_schema, legacy_state)
         require(legacy_state.stat().st_uid != 0, "legacy state was created as root")
         transient("migration", self.binary, "migrate-state", "--state", legacy_state)
         with sqlite3.connect(f"file:{legacy_state}?mode=ro", uri=True) as database:
