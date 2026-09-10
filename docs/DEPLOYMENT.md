@@ -8,17 +8,17 @@ Commands below use a POSIX shell on Linux; `sudo` marks host-level installation.
 
 ### Nix
 
-Build from the checkout containing the units and instructions you are using:
+Build v0.4.0:
 
 ```sh
-nix build
+nix build github:adamgrav/adguard-sentinel/v0.4.0
 ./result/bin/adguard-sentinel --help
 ```
 
 For a persistent systemd installation, keep the output rooted:
 
 ```sh
-sudo nix build . --out-link /opt/adguard-sentinel
+sudo nix build github:adamgrav/adguard-sentinel/v0.4.0 --out-link /opt/adguard-sentinel
 /opt/adguard-sentinel/bin/adguard-sentinel --help
 ```
 
@@ -34,7 +34,7 @@ version inside the checkout. SQLite, TLS, and time-zone data are bundled; no
 system SQLite or OpenSSL development package is needed.
 
 ```sh
-git clone https://github.com/adamgrav/adguard-sentinel
+git clone --branch v0.4.0 --depth 1 https://github.com/adamgrav/adguard-sentinel
 cd adguard-sentinel
 cargo build --locked --release
 sudo install -Dm755 target/release/adguard-sentinel /usr/local/bin/adguard-sentinel

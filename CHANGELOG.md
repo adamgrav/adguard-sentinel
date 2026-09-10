@@ -5,6 +5,8 @@ Notable changes to AdGuard Sentinel. The format follows
 
 ## Unreleased
 
+## 0.4.0 — 2026-09-09
+
 ### Added
 
 - Exclusive database ownership throughout each check, including observation and
@@ -63,7 +65,7 @@ learning after its latest ambiguous sample. See [MIGRATION](docs/MIGRATION.md).
 
 Configuration and run-report schema versions remain 1. The report adds
 `delivery_activity`, an `in_flight` notification status, and reports the current
-state version separately. No release version or tag has been assigned yet.
+state version separately.
 
 ## 0.3.0 — 2026-08-27
 
