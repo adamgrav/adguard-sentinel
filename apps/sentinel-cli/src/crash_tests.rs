@@ -584,6 +584,7 @@ fn maximum_unsigned_counts_survive_observation_sqlite_and_cli_json() {
             serde_json::json!({
                 "num_dns_queries": u64::MAX, "num_blocked_filtering": u64::MAX,
                 "avg_processing_time": 0.01,
+                "top_upstreams_responses": [{ upstream: u64::MAX }],
                 "top_upstreams_avg_time": [{ upstream: 0.02 }],
                 "top_clients": [{ "192.0.2.10": u64::MAX }],
             }),

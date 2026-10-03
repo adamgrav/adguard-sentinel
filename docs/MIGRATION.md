@@ -1,11 +1,12 @@
 # State migration
 
-`check` creates new SQLite v2 state but never upgrades an existing schema.
-`check` and `report` reject v1 until `migrate-state` succeeds. The migration
-command creates an absent v2 database, validates existing v2, or upgrades v1;
-it does not convert external monitor state or downgrade v2.
+`check` creates new SQLite v3 state but never upgrades an existing schema.
+`check` and `report` reject v1 and v2 until `migrate-state` succeeds. The
+migration command creates an absent v3 database, validates existing v3, or
+upgrades v1 or v2 in one transaction; it does not convert external monitor
+state or downgrade v3.
 
-## Upgrade v1 to v2
+## Upgrade to v3
 
 Stop scheduled and manual writers, retain the old binary, and run as the state
 owner with write access to the database's directory:
@@ -19,15 +20,19 @@ Use the actual service state path; [DEPLOYMENT](DEPLOYMENT.md#upgrade-state)
 describes the systemd workflow. Reporting an empty database returns no matching
 runs, which does not mean migration failed.
 
-Before changing v1, the command creates and validates an adjacent private
-`state.sqlite.v1-UUID.bak` with SQLite `VACUUM INTO`. Success prints its path.
+Before changing state, the command creates and validates an adjacent private
+`state.sqlite.vN-UUID.bak`, where `N` is the original version, with SQLite
+`VACUUM INTO`. Success prints its path.
 The schema/data migration is transactional: an invalid timestamp, broken
 reference, conflicting run modes, or failed write rolls back the upgrade.
 Insufficient disk space can prevent backup or migration; keep enough room for
 the backup and SQLite's transaction work. A failed attempt can leave a backup
 file; do not assume it is complete unless it was validated.
 
-V2 changes two interpretations of legacy state:
+V3 adds upstream response counts. Upstream observations stored before it keep a
+null count, and upstream latency starts measuring after two complete v3 runs.
+
+Upgrading v1 also applies v2's changes to two interpretations of legacy state:
 
 - V1 saturated oversized counters at `9223372036854775807`. Target observations
   containing that value are marked `counters_exact = false` and excluded from
@@ -50,8 +55,8 @@ do not delete history to force migration.
 
 ## Rollback
 
-Stop all writers and preserve the v2 database before restoring the validated
-v1 backup and old binary together. Do not point the old binary at v2 or merge
+Stop all writers and preserve the v3 database before restoring the validated
+backup and old binary together. Do not point the old binary at v3 or merge
 post-upgrade state into the backup. Restoring a backup discards later history
 and can reintroduce old pending notifications; review that delivery risk before
 resuming the old scheduler.

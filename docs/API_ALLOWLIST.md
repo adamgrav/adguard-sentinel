@@ -9,7 +9,7 @@ sends no `Authorization` header.
 | Request | Data retained |
 | --- | --- |
 | `GET /control/status` | version, running, protection |
-| `GET /control/stats?recent=<whole-hour-ms>` | totals, processing latency, per-upstream averages, top-client ratio only |
+| `GET /control/stats?recent=<whole-hour-ms>` | totals, processing latency, per-upstream averages and response counts, top-client ratio only |
 | `GET /control/dns_info` | declared upstream set and mode |
 | `GET /control/filtering/status` | required filter URL/state/count/update time |
 | `GET /control/rewrite/list` | normalized rewrite tuples and enabled state |

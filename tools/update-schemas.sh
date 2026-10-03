@@ -13,8 +13,11 @@ cargo run --quiet --locked -p sentinel-cli -- print-schema state --version 1 \
   > "$temporary_directory/state-v1.sql"
 cargo run --quiet --locked -p sentinel-cli -- print-schema state --version 2 \
   > "$temporary_directory/state-v2.sql"
+cargo run --quiet --locked -p sentinel-cli -- print-schema state --version 3 \
+  > "$temporary_directory/state-v3.sql"
 
 mv -- "$temporary_directory/config-v1.schema.json" "$repository_root/schemas/config-v1.schema.json"
 mv -- "$temporary_directory/run-report-v1.schema.json" "$repository_root/schemas/run-report-v1.schema.json"
 mv -- "$temporary_directory/state-v1.sql" "$repository_root/schemas/state-v1.sql"
 mv -- "$temporary_directory/state-v2.sql" "$repository_root/schemas/state-v2.sql"
+mv -- "$temporary_directory/state-v3.sql" "$repository_root/schemas/state-v3.sql"

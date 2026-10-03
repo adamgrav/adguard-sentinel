@@ -675,11 +675,21 @@
       "additionalProperties": false,
       "properties": {
         "average_seconds": {
+          "description": "`AdGuard Home`'s average over the successful, uncached responses this\nupstream gave within the reported statistics window.",
           "format": "double",
           "type": "number"
         },
         "identity": {
           "type": "string"
+        },
+        "responses": {
+          "description": "The number of responses behind `average_seconds`. Absent only for\nobservations recorded before state v3, which did not retain it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -773,7 +783,8 @@
     "state_schema_version": {
       "enum": [
         1,
-        2
+        2,
+        3
       ]
     },
     "targets": {

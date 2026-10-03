@@ -5,6 +5,27 @@ use sentinel_core::{ConditionEvaluation, EvaluationOutcome, RunReport};
 
 use crate::OutputFormat;
 
+/// The windowed upstream latency recorded for a target, as the slowest
+/// eligible upstream's average and response count, or the reason it was not
+/// evaluated. Reports from before windowed latency have no such evaluation; the
+/// caller then shows `AdGuard Home`'s raw current-hour maximum instead.
+fn upstream_latency(report: &RunReport, target_id: &str) -> Option<String> {
+    let id = format!("target:{target_id}:upstream-latency");
+    let evaluation = report
+        .evaluations
+        .iter()
+        .find(|evaluation| evaluation.id == id)?;
+    if evaluation.outcome == EvaluationOutcome::NotEvaluated {
+        return Some(format!("upstream_slowest=({})", evaluation.reason));
+    }
+    let seconds = evaluation.observed["seconds"].as_f64()?;
+    let responses = evaluation.observed["responses"].as_u64()?;
+    Some(format!(
+        "upstream_slowest={:.0}ms/{responses}",
+        seconds * 1_000.0
+    ))
+}
+
 pub(crate) fn output_reports(reports: &[RunReport], format: OutputFormat) -> anyhow::Result<()> {
     write_reports(&mut std::io::stdout().lock(), reports, format, false)
 }
@@ -54,13 +75,16 @@ fn human_report(output: &mut impl Write, report: &RunReport, explain: bool) -> a
         if let Some(observation) = target.operational.as_ref().filter(|_| target.complete) {
             writeln!(
                 output,
-                "{} [{}]: queries={} blocked={:.1}% processing={:.0}ms upstream_max={:.0}ms",
+                "{} [{}]: queries={} blocked={:.1}% processing={:.0}ms {}",
                 target.name,
                 target.id,
                 observation.queries,
                 observation.blocked_ratio * 100.0,
                 observation.average_processing_seconds * 1_000.0,
-                observation.maximum_upstream_seconds * 1_000.0,
+                upstream_latency(report, &target.id).unwrap_or_else(|| format!(
+                    "upstream_max={:.0}ms",
+                    observation.maximum_upstream_seconds * 1_000.0
+                )),
             )?;
         } else {
             writeln!(
@@ -315,6 +339,29 @@ mod tests {
         )
         .unwrap();
         String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn the_target_line_shows_windowed_upstream_latency_or_why_it_is_absent() {
+        let mut measured = evaluation("upstream_latency", Some("resolver-a"), "above_threshold");
+        measured.id = "target:resolver-a:upstream-latency".to_owned();
+        measured.outcome = EvaluationOutcome::Active;
+        measured.observed =
+            json!({"seconds": 0.9, "upstream": "tls://slow.invalid", "responses": 30});
+        let mut unmeasured = measured.clone();
+        unmeasured.outcome = EvaluationOutcome::NotEvaluated;
+        unmeasured.reason = "insufficient_responses".to_owned();
+
+        assert!(
+            human(&report(vec![measured]), false)
+                .contains("processing=10ms upstream_slowest=900ms/30")
+        );
+        assert!(
+            human(&report(vec![unmeasured]), false)
+                .contains("upstream_slowest=(insufficient_responses)")
+        );
+        // A report stored before windowed latency keeps the raw hourly maximum.
+        assert!(human(&report(vec![]), false).contains("upstream_max=20ms"));
     }
 
     #[test]

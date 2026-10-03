@@ -13,3 +13,4 @@
 *.tmp
 .DS_Store
 /.claude/
+*.sqlite.v2-*.bak

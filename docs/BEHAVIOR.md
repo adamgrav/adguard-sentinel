@@ -12,8 +12,9 @@ This document owns evaluation and latch semantics. Configuration defaults are in
 - API availability, invalid responses, unsupported versions, protection, latency,
   and policy drift use their respective configured sustain counts. Recovery has
   its own count.
-- Processing latency is active only above its threshold. Upstream latency uses
-  the maximum validated per-upstream average, also with a strict comparison.
+- Processing latency is active only above its threshold, using `AdGuard Home`'s
+  average for the current statistics unit. Upstream latency uses response
+  windows; see below.
 - Only declared policy fields create policy evaluations. Omitted fields are
   absent from `evaluations[]`, rather than clear or not evaluated. Extra filters
   and undeclared rewrites do not cause policy findings.
@@ -23,6 +24,35 @@ This document owns evaluation and latch semantics. Configuration defaults are in
 - Missing or invalid required AdGuard data makes the affected target incomplete.
   This includes wrong JSON types, invalid counters or metrics, duplicate
   normalized values, blocked counts above query counts, and unsupported versions.
+
+## Upstream latency
+
+Each reading records every upstream's cumulative response count and the summed
+duration recovered from its average. A window differences two consecutive
+complete readings of one target. An upstream absent from the earlier reading
+starts from zero. A pair yields no window unless both readings come from runs
+that started and completed within the same UTC hour, `AdGuard Home`'s
+statistics unit. It also yields none if any count or duration decreases, or
+elapsed time is nonpositive or exceeds 600 seconds. A response list at
+`AdGuard Home`'s 100-entry limit may be truncated, so that reading records
+unknown counts and starts no window.
+
+The check pools the windows ending within the last 1800 seconds, including the
+one ending at the current reading. Among upstreams with at least 20 pooled
+responses, the slowest pooled average is compared with `upstream_latency_ms`;
+equality is clear. The active summary names that upstream, its average, and
+its response count. `observed` lists every pooled upstream. A single burst of
+slow responses stays in the pool, and can keep the condition active, until its
+window leaves the lookback.
+
+| Not-evaluated reason | Meaning |
+| --- | --- |
+| `window_unavailable` | No valid window ends within the lookback, including a first run or the first run after migration |
+| `insufficient_responses` | No upstream has 20 pooled responses |
+
+Readings stored before state v3 have no counts and start no window.
+[ADR 0013](decisions/0013-upstream-latency-measures-pooled-windows.md) records
+the rationale and limits.
 
 ## Behavioral conditions
 

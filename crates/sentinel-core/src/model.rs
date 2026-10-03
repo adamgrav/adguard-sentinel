@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
-pub const STATE_SCHEMA_VERSION: u32 = 2;
+pub const STATE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, JsonSchema, Ord, PartialEq, PartialOrd, Serialize,
@@ -81,7 +81,12 @@ pub struct DnsObservation {
 #[serde(deny_unknown_fields)]
 pub struct UpstreamObservation {
     pub identity: String,
+    /// `AdGuard Home`'s average over the successful, uncached responses this
+    /// upstream gave within the reported statistics window.
     pub average_seconds: f64,
+    /// The number of responses behind `average_seconds`. Absent only for
+    /// observations recorded before state v3, which did not retain it.
+    pub responses: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -164,6 +169,58 @@ pub struct TargetSample {
     pub timestamp: i64,
     pub queries: u64,
     pub blocked: u64,
+}
+
+/// One persisted per-target reading of cumulative upstream response counts.
+///
+/// Like [`TargetSample`], it holds what `AdGuard Home` reported, and latency
+/// windows are derived on read by differencing consecutive readings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpstreamSample {
+    pub target_id: String,
+    /// When the run started, before any request; the statistics were read
+    /// between this and `timestamp`.
+    pub observation_started: i64,
+    /// When the run completed.
+    pub timestamp: i64,
+    pub upstreams: Vec<UpstreamCounter>,
+}
+
+/// One upstream's cumulative responses and their summed duration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpstreamCounter {
+    pub identity: String,
+    pub responses: u64,
+    pub total_microseconds: u64,
+}
+
+impl UpstreamCounter {
+    /// Recovers the summed duration behind an `AdGuard Home` average.
+    ///
+    /// `AdGuard Home` sums whole microseconds and divides by the response count
+    /// to report an average in seconds. Multiplying back and rounding restores
+    /// that integer sum, whose error stays far below half a microsecond for any
+    /// realistic total; differencing integers then cannot invent latency.
+    /// Returns `None` for a value that cannot be such a sum.
+    #[must_use]
+    pub fn from_average(identity: &str, average_seconds: f64, responses: u64) -> Option<Self> {
+        if !average_seconds.is_finite() || average_seconds < 0.0 {
+            return None;
+        }
+        let total = (average_seconds * 1_000_000.0 * responses as f64).round();
+        // 2^53: beyond this an f64 cannot represent every integer sum.
+        if total > 9_007_199_254_740_992.0 {
+            return None;
+        }
+        // Checked above: `total` is a nonnegative integer no larger than 2^53.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let total_microseconds = total as u64;
+        Some(Self {
+            identity: identity.to_owned(),
+            responses,
+            total_microseconds,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
