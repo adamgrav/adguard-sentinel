@@ -54,6 +54,7 @@ healthy default.
 | `api/malformed-negative-stats.json` | Negative `avg_processing_time` is rejected |
 | `api/malformed-blocked-exceeds-queries.json` | Blocked count above query count is rejected |
 | `api/malformed-duplicate-top-client.json` | A repeated client identity is rejected |
+| `api/malformed-upstream-average-without-responses.json` | An upstream average without a positive response count is rejected |
 | `api/malformed-dns-info-missing-mode.json` | A missing required field is rejected |
 | `api/malformed-whitespace-upstream-mode.json` | Whitespace is not the legacy empty-string alias |
 | `api/malformed-duplicate-rewrites.json` | Entries that collide after normalization are rejected |

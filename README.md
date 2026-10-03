@@ -95,7 +95,7 @@ attempts from earlier runs. `--format json` and `--format jsonl` provide the aut
 compatibility is flexible before 1.0; consult [RELEASING](RELEASING.md) and the
 [CHANGELOG](CHANGELOG.md) when upgrading.
 
-The current checkout uses SQLite v2. Existing v1 state requires explicit
+The current checkout uses SQLite v3. Existing v1 or v2 state requires explicit
 `migrate-state`; [MIGRATION](docs/MIGRATION.md) describes the automatic private
 backup, conservative treatment of old delivery records, and rollback.
 

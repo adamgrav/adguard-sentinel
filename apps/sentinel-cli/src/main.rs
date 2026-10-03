@@ -21,8 +21,8 @@ use sentinel_adguard::{AdGuardError, AdGuardReadClient, ReqwestAdGuardClient};
 use sentinel_core::{
     Clock, Config, EvaluationOutcome, ExitReport, NotificationProvider, REPORT_SCHEMA_VERSION,
     RunHealth, RunMode, RunReport, RunStatus, STATE_SCHEMA_VERSION, Severity, SystemClock,
-    TargetAuth, TargetReport, TargetStatus, evaluate_aggregate, evaluate_target,
-    evaluate_target_behavior, local_time_bucket,
+    TargetAuth, TargetReport, TargetStatus, UPSTREAM_HISTORY_SECONDS, evaluate_aggregate,
+    evaluate_target, evaluate_target_behavior, evaluate_upstream_latency, local_time_bucket,
 };
 use sentinel_store::{NotificationAttemptOutcome, StateStore, canonical_state_schema};
 use tracing_subscriber::EnvFilter;
@@ -342,6 +342,31 @@ async fn check_with_sink(
     let cutoff_unix_seconds = completed
         .as_second()
         .saturating_sub(i64::from(config.state.retention_days) * 86_400);
+    let upstream_samples = store
+        .load_upstream_samples(
+            completed
+                .as_second()
+                .saturating_sub(UPSTREAM_HISTORY_SECONDS),
+        )
+        .map_err(CommandError::state)?;
+    for target in &config.targets {
+        let report = targets
+            .iter()
+            .find(|report| report.id == target.id)
+            .expect("every configured target has a report");
+        let profile = config
+            .condition_profiles
+            .get(&target.condition_profile)
+            .expect("validated condition profile reference");
+        evaluations.extend(evaluate_upstream_latency(
+            target,
+            profile,
+            report,
+            &upstream_samples,
+            started.as_second(),
+            completed.as_second(),
+        ));
+    }
     let aggregate_evaluation = if let Some(baseline) = &config.behavioral_baseline {
         let (local_hour, utc_offset_minutes) = local_time_bucket(completed, &baseline.time_zone)
             .map_err(|error| {
@@ -629,7 +654,7 @@ fn versioned_schema<T: serde::Serialize>(
     if include_state_version {
         properties.insert(
             "state_schema_version".to_owned(),
-            serde_json::json!({ "enum": [1, STATE_SCHEMA_VERSION] }),
+            serde_json::json!({ "enum": [1, 2, STATE_SCHEMA_VERSION] }),
         );
     }
     Ok(value)
@@ -1038,6 +1063,55 @@ minimum_same_hour_samples = 36
         }
     }
 
+    /// Two consecutive statistics readings five minutes apart: the slow upstream
+    /// answers 30 queries at 900 ms between them.
+    const STATS_BEFORE: &str = r#"{"num_dns_queries":1000,"num_blocked_filtering":100,
+        "avg_processing_time":0.01,"top_clients":[{"192.0.2.10":600}],
+        "top_upstreams_responses":[{"tls://fast.example.invalid":100},{"tls://slow.example.invalid":10}],
+        "top_upstreams_avg_time":[{"tls://fast.example.invalid":0.02},{"tls://slow.example.invalid":1.0}]}"#;
+    const STATS_AFTER: &str = r#"{"num_dns_queries":2000,"num_blocked_filtering":200,
+        "avg_processing_time":0.01,"top_clients":[{"192.0.2.10":1200}],
+        "top_upstreams_responses":[{"tls://fast.example.invalid":200},{"tls://slow.example.invalid":40}],
+        "top_upstreams_avg_time":[{"tls://fast.example.invalid":0.02},{"tls://slow.example.invalid":0.925}]}"#;
+
+    #[tokio::test]
+    async fn consecutive_checks_measure_upstream_latency_between_them() {
+        let server = MockServer::start_async().await;
+        let mocks = serve_golden_replacing(&server, "/control/stats", STATS_BEFORE).await;
+        let harness = harness(
+            &server.base_url(),
+            DECLARED_MODE,
+            1,
+            Notifications::Disabled,
+        );
+        run_at(&harness, "2027-01-15T08:00:00Z")
+            .await
+            .expect("first run");
+        for mock in mocks {
+            mock.delete_async().await;
+        }
+        let _mocks = serve_golden_replacing(&server, "/control/stats", STATS_AFTER).await;
+
+        run_at(&harness, "2027-01-15T08:05:00Z")
+            .await
+            .expect("second run");
+
+        let report = latest_report(&harness);
+        let latency = report
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.id == "target:resolver-a:upstream-latency")
+            .expect("upstream latency evaluation");
+        assert_eq!(latency.outcome, EvaluationOutcome::Active);
+        assert_eq!(latency.observed["upstream"], "tls://slow.example.invalid");
+        assert_eq!(latency.observed["responses"], 30);
+        assert_eq!(latency.observed["window_seconds"], 300);
+        assert_eq!(
+            latency.summary,
+            "Resolver A upstream tls://slow.example.invalid is persistently slow: 900 ms average over 30 responses"
+        );
+    }
+
     /// Kinds produced by the behavioural baseline, which only exist for targets
     /// named in `[behavioral_baseline].target_ids`.
     const BEHAVIORAL_KINDS: [&str; 3] = ["query_rate", "blocked_ratio", "blocking_collapse"];
@@ -1098,11 +1172,12 @@ minimum_same_hour_samples = 36
                     "matches_policy",
                     EvaluationOutcome::Clear,
                 ),
+                // A first run has no earlier reading to difference against.
                 (
                     "target:resolver-a:upstream-latency",
                     "upstream_latency",
-                    "within_threshold",
-                    EvaluationOutcome::Clear,
+                    "window_unavailable",
+                    EvaluationOutcome::NotEvaluated,
                 ),
                 (
                     "target:resolver-a:upstream-mode",

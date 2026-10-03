@@ -240,7 +240,10 @@ impl AdGuardReadClient for ReqwestAdGuardClient {
             .await?;
 
         let operational = normalize_stats(status.protection_enabled, &statistics)?;
-        let upstreams = normalize_upstreams(&statistics.top_upstreams_avg_time)?;
+        let upstreams = normalize_upstreams(
+            &statistics.top_upstreams_avg_time,
+            &statistics.top_upstreams_responses,
+        )?;
         let dns = normalize_dns(dns)?;
         let filters = normalize_filters(filtering.filters, policy, now_unix_seconds)?;
         let rewrites = normalize_rewrites(rewrites)?;
@@ -316,6 +319,7 @@ struct StatsResponse {
     num_dns_queries: u64,
     num_blocked_filtering: u64,
     avg_processing_time: f64,
+    top_upstreams_responses: Vec<BTreeMap<String, u64>>,
     top_upstreams_avg_time: Vec<BTreeMap<String, f64>>,
     top_clients: Vec<BTreeMap<String, u64>>,
 }
@@ -363,7 +367,10 @@ fn normalize_stats(
     if !stats.avg_processing_time.is_finite() || stats.avg_processing_time < 0.0 {
         return invalid_stats("avg_processing_time must be finite and nonnegative");
     }
-    let upstreams = normalize_upstreams(&stats.top_upstreams_avg_time)?;
+    let upstreams = normalize_upstreams(
+        &stats.top_upstreams_avg_time,
+        &stats.top_upstreams_responses,
+    )?;
     let maximum_upstream_seconds = upstreams
         .iter()
         .map(|upstream| upstream.average_seconds)
@@ -394,12 +401,35 @@ fn normalize_stats(
     })
 }
 
+/// `AdGuard Home` truncates its per-upstream response list to this many entries.
+const UPSTREAM_LIST_LIMIT: usize = 100;
+
+/// Joins `AdGuard Home`'s per-upstream averages with their response counts.
+///
+/// Below the list limit, both lists are complete: every average needs a
+/// positive count, and a counted upstream without an average had a summed
+/// duration of zero, which `AdGuard Home` omits. A response list at the limit
+/// may be truncated, and its statistics keep each list's largest values
+/// independently, so counts and averages can then describe different
+/// upstreams. Counts are reported as unknown for that reading instead.
 fn normalize_upstreams(
-    entries: &[BTreeMap<String, f64>],
+    averages: &[BTreeMap<String, f64>],
+    responses: &[BTreeMap<String, u64>],
 ) -> Result<Vec<UpstreamObservation>, AdGuardError> {
+    let mut counts = BTreeMap::new();
+    for entry in responses {
+        if entry.len() != 1 {
+            return invalid_stats("each upstream response entry must contain exactly one upstream");
+        }
+        let (identity, count) = entry.iter().next().expect("entry length checked");
+        if identity.is_empty() || counts.insert(identity.clone(), *count).is_some() {
+            return invalid_stats("upstream responses contain invalid or duplicate data");
+        }
+    }
+    let possibly_truncated = responses.len() >= UPSTREAM_LIST_LIMIT;
+    let mut normalized = Vec::with_capacity(counts.len());
     let mut seen = BTreeSet::new();
-    let mut normalized = Vec::with_capacity(entries.len());
-    for entry in entries {
+    for entry in averages {
         if entry.len() != 1 {
             return invalid_stats("each upstream latency entry must contain exactly one upstream");
         }
@@ -411,10 +441,30 @@ fn normalize_upstreams(
         {
             return invalid_stats("upstream latency contains invalid or duplicate data");
         }
+        let responses = if possibly_truncated {
+            None
+        } else {
+            match counts.get(identity) {
+                Some(&count) if count > 0 => Some(count),
+                _ => return invalid_stats("upstream latency has no positive response count"),
+            }
+        };
         normalized.push(UpstreamObservation {
             identity: identity.clone(),
             average_seconds: *average,
+            responses,
         });
+    }
+    if !possibly_truncated {
+        for (identity, count) in counts {
+            if !seen.contains(&identity) {
+                normalized.push(UpstreamObservation {
+                    identity,
+                    average_seconds: 0.0,
+                    responses: Some(count),
+                });
+            }
+        }
     }
     normalized.sort_by(|left, right| left.identity.cmp(&right.identity));
     Ok(normalized)
@@ -569,6 +619,7 @@ fn request_error_detail(error: &reqwest::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -581,7 +632,7 @@ mod tests {
     use super::{
         AdGuardError, AdGuardReadClient, DnsResponse, FilteringResponse, ReqwestAdGuardClient,
         RewriteResponse, StatsResponse, normalize_dns, normalize_filters, normalize_rewrites,
-        normalize_stats,
+        normalize_stats, normalize_upstreams,
     };
 
     const NOW: i64 = 1_800_000_000;
@@ -613,6 +664,8 @@ mod tests {
         include_str!("../../../testdata/api/malformed-blocked-exceeds-queries.json");
     const MALFORMED_DUPLICATE_TOP_CLIENT: &str =
         include_str!("../../../testdata/api/malformed-duplicate-top-client.json");
+    const MALFORMED_UPSTREAM_AVERAGE_WITHOUT_RESPONSES: &str =
+        include_str!("../../../testdata/api/malformed-upstream-average-without-responses.json");
     const MALFORMED_DNS_INFO_MISSING_MODE: &str =
         include_str!("../../../testdata/api/malformed-dns-info-missing-mode.json");
     const MALFORMED_WHITESPACE_UPSTREAM_MODE: &str =
@@ -754,6 +807,19 @@ mod tests {
         assert!(near(operational.average_processing_seconds, 0.0182));
         assert!(near(operational.maximum_upstream_seconds, 0.0241));
         assert!(near(operational.top_client_share, 0.62));
+        let counts: Vec<_> = report
+            .upstreams
+            .iter()
+            .map(|upstream| (upstream.identity.as_str(), upstream.responses))
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                ("https://cloudflare-dns.com/dns-query", Some(1_300)),
+                ("quic://dns10.quad9.net", Some(2_100)),
+                ("tls://unfiltered.adguard-dns.com", Some(1_600)),
+            ]
+        );
 
         let dns = report.dns.expect("dns observation");
         assert_eq!(dns.upstream_mode, "load_balance");
@@ -1209,12 +1275,111 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_upstream_average_without_a_response_count() {
+        let error = normalize_stats(
+            true,
+            &stats_of(MALFORMED_UPSTREAM_AVERAGE_WITHOUT_RESPONSES),
+        )
+        .expect_err("an average without a count must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/stats: upstream latency has no positive response count"
+        );
+    }
+
+    #[test]
+    fn joins_upstream_counts_and_reports_zero_for_a_counted_upstream_without_an_average() {
+        let stats = stats_of(
+            r#"{"num_dns_queries":10,"num_blocked_filtering":0,"avg_processing_time":0.01,
+                "top_upstreams_responses":[{"tls://b.example.invalid":3},{"tls://a.example.invalid":7}],
+                "top_upstreams_avg_time":[{"tls://a.example.invalid":0.02}],"top_clients":[]}"#,
+        );
+
+        let upstreams = normalize_upstreams(
+            &stats.top_upstreams_avg_time,
+            &stats.top_upstreams_responses,
+        )
+        .expect("valid upstream statistics");
+
+        let rendered: Vec<_> = upstreams
+            .iter()
+            .map(|upstream| {
+                (
+                    upstream.identity.as_str(),
+                    upstream.average_seconds,
+                    upstream.responses,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            [
+                ("tls://a.example.invalid", 0.02, Some(7)),
+                ("tls://b.example.invalid", 0.0, Some(3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn counts_at_the_list_limit_are_unknown_rather_than_joined() {
+        // 100 counted upstreams: AdGuard may have truncated either list, so the
+        // average for `a` has no count and `z` has a count but no average.
+        let mut responses: Vec<BTreeMap<String, u64>> = (0..99)
+            .map(|index| BTreeMap::from([(format!("tls://{index}.example.invalid"), 5)]))
+            .collect();
+        responses.push(BTreeMap::from([("tls://z.example.invalid".to_owned(), 9)]));
+        let averages = vec![BTreeMap::from([(
+            "tls://a.example.invalid".to_owned(),
+            0.3,
+        )])];
+
+        let upstreams =
+            normalize_upstreams(&averages, &responses).expect("possibly truncated statistics");
+
+        let rendered: Vec<_> = upstreams
+            .iter()
+            .map(|upstream| {
+                (
+                    upstream.identity.as_str(),
+                    upstream.average_seconds,
+                    upstream.responses,
+                )
+            })
+            .collect();
+        assert_eq!(rendered, [("tls://a.example.invalid", 0.3, None)]);
+        // One entry fewer is complete, so the same average without a count is invalid.
+        responses.pop();
+        assert!(normalize_upstreams(&averages, &responses).is_err());
+    }
+
+    #[test]
+    fn rejects_a_duplicated_upstream_response_identity() {
+        let stats = stats_of(
+            r#"{"num_dns_queries":10,"num_blocked_filtering":0,"avg_processing_time":0.01,
+                "top_upstreams_responses":[{"tls://a.example.invalid":3},{"tls://a.example.invalid":7}],
+                "top_upstreams_avg_time":[],"top_clients":[]}"#,
+        );
+
+        let error = normalize_upstreams(
+            &stats.top_upstreams_avg_time,
+            &stats.top_upstreams_responses,
+        )
+        .expect_err("a duplicated response identity must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "AdGuard API response was invalid at GET /control/stats: upstream responses contain invalid or duplicate data"
+        );
+    }
+
+    #[test]
     fn required_stats_fields_and_json_syntax_are_strict() {
         assert!(serde_json::from_str::<StatsResponse>("{}").is_err());
         assert!(serde_json::from_str::<StatsResponse>("{not-json}").is_err());
         assert!(
             serde_json::from_str::<StatsResponse>(
-                r#"{"num_dns_queries":"100","num_blocked_filtering":20,"avg_processing_time":0.01,"top_upstreams_avg_time":[],"top_clients":[]}"#,
+                r#"{"num_dns_queries":"100","num_blocked_filtering":20,"avg_processing_time":0.01,"top_upstreams_responses":[],"top_upstreams_avg_time":[],"top_clients":[]}"#,
             )
             .is_err()
         );

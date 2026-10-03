@@ -239,11 +239,11 @@ fn explicit_migration_preserves_a_private_v1_backup_and_quarantines_unsent_histo
         drop(connection);
         assert!(matches!(
             StateStore::open(&path),
-            Err(super::StoreError::MigrationRequired)
+            Err(super::StoreError::MigrationRequired { observed: 1 })
         ));
         assert!(matches!(
             StateStore::open_existing(&path),
-            Err(super::StoreError::MigrationRequired)
+            Err(super::StoreError::MigrationRequired { observed: 1 })
         ));
         let (mut store, backup) = StateStore::migrate(&path).expect("migrate");
         let backup = backup.expect("backup before upgrade");
@@ -406,7 +406,7 @@ fn invalid_legacy_state_rolls_back_every_migration_change() {
         assert!(StateStore::migrate(&path).is_err(), "{fault}");
         let saved = Connection::open(&path).expect("failed migration source");
         schema::validate(&saved, 1).expect("still v1");
-        assert_eq!(saved.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'state_identity' OR name LIKE '%_v2'", [], |row| row.get::<_, i64>(0)).expect("new tables"), 0);
+        assert_eq!(saved.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'state_identity' OR name LIKE '%_rebuild'", [], |row| row.get::<_, i64>(0)).expect("new tables"), 0);
         assert_eq!(saved.query_row("SELECT type FROM pragma_table_info('target_observations') WHERE name = 'queries'", [], |row| row.get::<_, String>(0)).expect("old type"), "INTEGER");
     }
 }
@@ -447,7 +447,7 @@ fn disk_full_initialization_and_migration_are_atomic() {
     legacy
         .pragma_update(None, "max_page_count", pages)
         .expect("no headroom");
-    assert!(schema::migrate(&mut legacy).is_err());
+    assert!(schema::migrate(&mut legacy, 1).is_err());
     schema::validate(&legacy, 1).expect("migration rolled back");
     assert_eq!(
         legacy
@@ -458,7 +458,7 @@ fn disk_full_initialization_and_migration_are_atomic() {
     legacy
         .pragma_update(None, "max_page_count", 10000)
         .expect("restore migration capacity");
-    schema::migrate(&mut legacy).expect("retry migration");
+    schema::migrate(&mut legacy, 1).expect("retry migration");
 }
 
 #[test]
@@ -1137,5 +1137,170 @@ fn retention_keeps_the_latest_precision_barrier_when_old_delivery_evidence_survi
             .map(|report| report.run_id.as_str())
             .collect::<Vec<_>>(),
         ["c", "barrier", "a"]
+    );
+}
+
+const V2_START: &str = "2026-01-01T00:00:00.000000000Z";
+
+/// A released v2 database holding one complete observation of one upstream.
+fn version_two(path: &std::path::Path) -> Connection {
+    let connection = Connection::open(path).expect("v2 database");
+    connection
+        .execute_batch(&schema::v2_sql())
+        .expect("released v2 schema");
+    for (version, name) in [(1, "initial"), (2, "durable-delivery")] {
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?1, ?2, ?3, ?4)",
+                params![version, name, schema::checksum(version), V2_START],
+            )
+            .expect("released migration checksum");
+    }
+    connection
+        .execute(
+            "INSERT INTO state_identity(singleton, run_mode) VALUES (1, 'live')",
+            [],
+        )
+        .expect("run mode");
+    legacy_run(&connection, "v2-run", "live", V2_START);
+    connection.execute("INSERT INTO target_observations(run_id, target_id, target_name, status, complete, queries, blocked)
+        VALUES ('v2-run', 'resolver', 'Resolver', 'complete', 1, '10', '1')", []).expect("v2 target");
+    connection.execute("INSERT INTO upstream_observations(run_id, target_id, ordinal, upstream_identity, average_seconds)
+        VALUES ('v2-run', 'resolver', 0, 'tls://a.invalid', 0.02)", []).expect("v2 upstream");
+    connection
+}
+
+/// The upstream table definition. `SQLite` quotes a table's name when it is
+/// renamed into place, as every migration rebuild does; the quoting is removed
+/// so only the definition is compared.
+fn upstream_table_sql(connection: &Connection) -> String {
+    connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'upstream_observations'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("upstream table")
+        .replace("\"upstream_observations\"", "upstream_observations")
+}
+
+#[test]
+fn explicit_migration_upgrades_v2_and_keeps_unrecorded_upstream_counts_unknown() {
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("state.sqlite");
+    drop(version_two(&path));
+    assert!(matches!(
+        StateStore::open(&path),
+        Err(super::StoreError::MigrationRequired { observed: 2 })
+    ));
+    assert!(matches!(
+        StateStore::open_existing(&path),
+        Err(super::StoreError::MigrationRequired { observed: 2 })
+    ));
+
+    let (store, backup) = StateStore::migrate(&path).expect("migrate");
+
+    let backup = backup.expect("backup before upgrade");
+    assert!(
+        backup
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("state.sqlite.v2-"))
+    );
+    schema::validate(&Connection::open(&backup).expect("backup"), 2).expect("untouched v2 backup");
+    assert_eq!(store.schema_version(), 3);
+    let report = &store.load_reports(1, None).expect("migrated report")[0];
+    let upstream = &report.targets[0].upstreams[0];
+    assert_eq!(upstream.identity, "tls://a.invalid");
+    assert_eq!(upstream.responses, None);
+    assert!(
+        store.load_upstream_samples(0).expect("samples").is_empty(),
+        "a reading without counts must not start a latency window"
+    );
+    let fresh = StateStore::open(&directory.path().join("fresh.sqlite")).expect("fresh store");
+    assert_eq!(
+        upstream_table_sql(&store.connection),
+        upstream_table_sql(&fresh.connection)
+    );
+}
+
+fn target_with_upstreams(
+    id: &str,
+    complete: bool,
+    upstreams: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id, "name": id, "status": if complete { "complete" } else { "unavailable" },
+        "complete": complete, "server_version": null,
+        "operational": complete.then(|| serde_json::json!({
+            "protection_enabled": true, "queries": 10, "blocked": 1, "blocked_ratio": 0.1,
+            "average_processing_seconds": 0.001, "maximum_upstream_seconds": 0.02,
+            "top_client_share": 0.5
+        })),
+        "dns": null, "filtering_enabled": null, "rewrites_enabled": null,
+        "upstreams": upstreams, "filters": [], "rewrites": [],
+        "error_kind": null, "error_detail": null
+    })
+}
+
+#[test]
+fn upstream_samples_round_trip_counts_and_omit_incomplete_targets() {
+    let directory = tempdir().expect("tempdir");
+    let mut store = StateStore::open(&directory.path().join("state.sqlite")).expect("store");
+    for (second, responses) in [(0_u32, 10_u64), (30, 25)] {
+        let mut report = empty_report();
+        report.run_id = format!("run-{second}");
+        report.started_at = format!("2026-01-01T00:00:{second:02}Z");
+        report.completed_at.clone_from(&report.started_at);
+        report.targets = serde_json::from_value(serde_json::json!([
+            target_with_upstreams(
+                "a",
+                true,
+                &serde_json::json!([
+                    {"identity": "tls://a.invalid", "average_seconds": 0.02, "responses": responses}
+                ])
+            ),
+            target_with_upstreams("b", false, &serde_json::json!([])),
+        ]))
+        .expect("targets");
+        store
+            .commit_run(
+                &mut report,
+                &config(),
+                1_767_225_600 + i64::from(second),
+                CUTOFF,
+                false,
+            )
+            .expect("commit run");
+    }
+
+    let samples = store.load_upstream_samples(0).expect("samples");
+
+    let rendered: Vec<_> = samples
+        .iter()
+        .map(|sample| {
+            let counter = &sample.upstreams[0];
+            (
+                sample.target_id.as_str(),
+                sample.timestamp,
+                counter.identity.as_str(),
+                counter.responses,
+                counter.total_microseconds,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rendered,
+        [
+            ("a", 1_767_225_600, "tls://a.invalid", 10, 200_000),
+            ("a", 1_767_225_630, "tls://a.invalid", 25, 500_000),
+        ]
+    );
+    assert_eq!(
+        store
+            .load_upstream_samples(1_767_225_601)
+            .expect("recent samples")
+            .len(),
+        1
     );
 }

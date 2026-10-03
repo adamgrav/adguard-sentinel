@@ -5,7 +5,7 @@ Generate the current formats with:
 ```sh
 adguard-sentinel print-schema config --version 1
 adguard-sentinel print-schema run-report --version 1
-adguard-sentinel print-schema state --version 2
+adguard-sentinel print-schema state --version 3
 ```
 
 The checked-in [schemas](../schemas/) come from the Rust types and canonical SQL.
@@ -52,7 +52,10 @@ report object per line. `--format json` accepts a single report; use JSONL for
 multiple historical reports.
 
 Counts remain JSON integers across the full `u64` range. Consumers must preserve
-integer precision when parsing them.
+integer precision when parsing them. `targets[].upstreams[].responses` is the
+count behind that upstream's average; it is null for observations stored before
+state v3. `operational.maximum_upstream_seconds` remains `AdGuard Home`'s raw
+current-hour maximum; the upstream latency condition does not use it.
 
 Reports exclude credentials and client/query identities, but retain resolver
 names, upstreams, filter URLs, rewrite tuples, counters, and policy evidence.
@@ -81,7 +84,8 @@ and phrasing. Current kinds and reasons are:
 | --- | --- |
 | `api` | `available`, `unavailable`, `authentication_rejected`, `invalid_response`, `unsupported_version` |
 | `protection` | `enabled`, `disabled` |
-| `processing_latency`, `upstream_latency` | `within_threshold`, `above_threshold` |
+| `processing_latency` | `within_threshold`, `above_threshold` |
+| `upstream_latency` | `within_threshold`, `above_threshold`, `window_unavailable`, `insufficient_responses` |
 | `upstream_mode`, `upstream_set`, `rewrite_settings` | `matches_policy`, `drift` |
 | `required_filter` | `matches_policy`, `missing`, `state_drift`, `stale` |
 | `required_rewrite` | `matches_policy`, `missing_or_disabled`, `globally_disabled` |
@@ -124,7 +128,10 @@ Older exports without `delivery_activity` read as an empty array. Delivery
 fields can reflect later attempts or conservative migration decisions; stored
 observation outcomes are not re-evaluated. `state_schema_version` identifies the
 database schema used to read the report, so migrated history reports version
-`2`; it does not identify the original producer.
+`3`; it does not identify the original producer.
+
+Before state v3, upstream latency compared the raw current-hour maximum. Stored
+evaluations keep that meaning and lack the `observed.upstreams` evidence.
 
 Before 0.3.0, aggregate readiness fields counted raw readings. Those historical
 values retain that meaning; they are not recalculated as windows. The current
@@ -133,17 +140,18 @@ reports. Report version 1 alone therefore does not identify the producer's
 pre-1.0 semantics. Keep the producing release alongside exports when comparing
 history across upgrades.
 
-## SQLite v2
+## SQLite v3
 
-[schemas/state-v2.sql](../schemas/state-v2.sql) defines current private state.
+[schemas/state-v3.sql](../schemas/state-v3.sql) defines current private state.
 `PRAGMA user_version` and checksummed migration rows identify its version.
-The released [v1 schema](../schemas/state-v1.sql) remains frozen and available
-through `print-schema state --version 1`.
+The released [v1](../schemas/state-v1.sql) and [v2](../schemas/state-v2.sql)
+schemas remain frozen and available through `print-schema state`.
 
 V2 stores unsigned counters as validated decimal text, avoiding SQLite's signed
 integer limit. Live/dry-run identity persists independently of retained runs.
 Delivery attempts, original batch membership, and episode identity support
-recovery without silently replaying possibly transmitted messages.
+recovery without silently replaying possibly transmitted messages. V3 adds each
+upstream's response count, NULL for readings stored before it.
 
-`check` creates new v2 state. Both `check` and `report` refuse v1 until an
-explicit [migration](MIGRATION.md), including its pre-upgrade backup, succeeds.
+`check` creates new v3 state. Both `check` and `report` refuse v1 and v2 until
+an explicit [migration](MIGRATION.md), including its pre-upgrade backup, succeeds.

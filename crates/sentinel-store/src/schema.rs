@@ -3,12 +3,48 @@ use sha2::{Digest, Sha256};
 
 use super::{StoreError, canonical_timestamp};
 
-pub(super) const VERSION: i64 = 2;
+pub(super) const VERSION: i64 = 3;
 pub(super) const V1: &str = include_str!("../../../schemas/state-v1.sql");
 
-/// The released v1 schema is immutable. The current schema is derived here;
-/// `print-schema state --version 2` generates the checked-in review artifact.
+/// Migration names recorded in `schema_migrations`, indexed by version - 1.
+const NAMES: [&str; 3] = ["initial", "durable-delivery", "upstream-response-counts"];
+
+/// A STRICT TEXT column holding a canonical unsigned 64-bit decimal integer.
+fn unsigned_text_column(column: &str, nullable: bool) -> String {
+    let required = if nullable { "" } else { " NOT NULL" };
+    let valid = format!(
+        "({column} = '0' OR (substr({column}, 1, 1) BETWEEN '1' AND '9' \
+         AND {column} NOT GLOB '*[^0-9]*' AND (length({column}) < 20 \
+         OR (length({column}) = 20 AND {column} <= '18446744073709551615'))))"
+    );
+    let valid = if nullable {
+        format!("{column} IS NULL OR {valid}")
+    } else {
+        valid
+    };
+    format!("{column} TEXT{required} CHECK ({valid})")
+}
+
+/// The current schema; `print-schema state --version 3` generates the
+/// checked-in review artifact.
+///
+/// V3 adds each upstream's response count. Observations recorded before v3
+/// keep a NULL count, which latency windows treat as unknown rather than zero.
 pub(super) fn current_sql() -> String {
+    v2_sql()
+        .replace(
+            "  average_seconds REAL NOT NULL CHECK (average_seconds >= 0),\n",
+            &format!(
+                "  average_seconds REAL NOT NULL CHECK (average_seconds >= 0),\n  {},\n",
+                unsigned_text_column("responses", true)
+            ),
+        )
+        .replace("PRAGMA user_version = 2;", "PRAGMA user_version = 3;")
+}
+
+/// The released v2 schema, derived from the immutable v1 schema. Released v2
+/// databases store this derivation's checksum, so it must not change.
+pub(super) fn v2_sql() -> String {
     let mut sql = V1.to_owned();
     for (column, nullable) in [
         ("queries", true),
@@ -18,17 +54,7 @@ pub(super) fn current_sql() -> String {
     ] {
         let required = if nullable { "" } else { " NOT NULL" };
         let old = format!("{column} INTEGER{required} CHECK ({column} >= 0)");
-        let valid = format!(
-            "({column} = '0' OR (substr({column}, 1, 1) BETWEEN '1' AND '9' \
-             AND {column} NOT GLOB '*[^0-9]*' AND (length({column}) < 20 \
-             OR (length({column}) = 20 AND {column} <= '18446744073709551615'))))"
-        );
-        let valid = if nullable {
-            format!("{column} IS NULL OR {valid}")
-        } else {
-            valid
-        };
-        sql = sql.replace(&old, &format!("{column} TEXT{required} CHECK ({valid})"));
+        sql = sql.replace(&old, &unsigned_text_column(column, nullable));
     }
     sql = sql.replace(
         "last_transition_run TEXT\n",
@@ -74,10 +100,10 @@ pub(super) fn current_sql() -> String {
 }
 
 pub(super) fn checksum(version: i64) -> String {
-    let sql = if version == 1 {
-        V1.to_owned()
-    } else {
-        current_sql()
+    let sql = match version {
+        1 => V1.to_owned(),
+        2 => v2_sql(),
+        _ => current_sql(),
     };
     let digest = Sha256::digest(sql.as_bytes());
     format!("sha256:{}", sentinel_core::hex::encode(&digest))
@@ -119,25 +145,76 @@ pub(super) fn initialize(connection: &mut Connection) -> Result<(), StoreError> 
     for version in 1..=VERSION {
         transaction.execute(
             "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?1, ?2, ?3, ?4)",
-            params![version, if version == 1 { "initial" } else { "durable-delivery" }, checksum(version), applied],
+            params![version, migration_name(version), checksum(version), applied],
         )?;
     }
     transaction.commit()?;
     Ok(())
 }
 
-pub(super) fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
-    validate(connection, 1)?;
+fn migration_name(version: i64) -> &'static str {
+    usize::try_from(version - 1)
+        .ok()
+        .and_then(|index| NAMES.get(index))
+        .copied()
+        .unwrap_or("unknown")
+}
+
+/// Upgrades released v1 or v2 state to the current version in one transaction.
+pub(super) fn migrate(connection: &mut Connection, from: i64) -> Result<(), StoreError> {
+    if !(1..VERSION).contains(&from) {
+        return Err(StoreError::UnsupportedVersion {
+            observed: from,
+            expected: VERSION,
+        });
+    }
+    validate(connection, from)?;
     // Rebuilding referenced tables requires disabling FK enforcement before BEGIN.
     // The complete result is checked inside the transaction before it can commit.
     connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
-    let result = migrate_transaction(connection);
+    let result = migrate_transaction(connection, from);
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
     result
 }
 
-fn migrate_transaction(connection: &mut Connection) -> Result<(), StoreError> {
+fn migrate_transaction(connection: &mut Connection, from: i64) -> Result<(), StoreError> {
     let transaction = connection.transaction()?;
+    // The v2 step reads observations through the current loader, which needs
+    // the v3 count column, so the column is added first.
+    add_upstream_response_counts(&transaction)?;
+    if from < 2 {
+        migrate_to_v2(&transaction)?;
+    }
+    transaction.execute(
+        "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (3, ?1, ?2, ?3)",
+        params![
+            migration_name(3),
+            checksum(3),
+            format!("{:.9}", jiff::Timestamp::now())
+        ],
+    )?;
+    let invalid_foreign_keys: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if invalid_foreign_keys != 0 {
+        return Err(StoreError::InvalidData(
+            "legacy state contains broken foreign keys".to_owned(),
+        ));
+    }
+    transaction.execute_batch(&format!("PRAGMA user_version = {VERSION};"))?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Adds the nullable upstream response count; the table is otherwise
+/// identical in v1 and v2. Existing rows keep NULL: their counts were never
+/// retained and must not read as zero responses.
+fn add_upstream_response_counts(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    rebuild_table(transaction, &current_sql(), "upstream_observations")
+}
+
+fn migrate_to_v2(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     let modes = {
         let mut statement = transaction.prepare("SELECT DISTINCT mode FROM runs ORDER BY mode")?;
         statement
@@ -160,7 +237,7 @@ fn migrate_transaction(connection: &mut Connection) -> Result<(), StoreError> {
             ));
         }
     }
-    let current = current_sql();
+    let current = v2_sql();
     for table in [
         "runs",
         "target_observations",
@@ -172,7 +249,7 @@ fn migrate_transaction(connection: &mut Connection) -> Result<(), StoreError> {
         "notification_conditions",
         "notification_attempts",
     ] {
-        rebuild_table(&transaction, &current, table)?;
+        rebuild_table(transaction, &current, table)?;
     }
     transaction.execute_batch(table_sql(&current, "state_identity")?)?;
     if let Some(mode) = modes.first() {
@@ -182,29 +259,22 @@ fn migrate_transaction(connection: &mut Connection) -> Result<(), StoreError> {
         )?;
     }
     transaction.execute_batch("CREATE INDEX outbox_status_idx ON notification_outbox(status, created_at); CREATE INDEX runs_completed_at_idx ON runs(completed_at);")?;
-    normalize_timestamps(&transaction)?;
+    normalize_timestamps(transaction)?;
     // v1 saturated u64 counters to i64::MAX. Keep the reported historical
     // value, but never use an ambiguous count as a rate-window endpoint.
     transaction.execute(
         "UPDATE target_observations SET counters_exact = 0 WHERE queries = '9223372036854775807' OR blocked = '9223372036854775807'", [],
     )?;
-    migrate_notification_history(&transaction)?;
-    migrate_health(&transaction)?;
-    let invalid_foreign_keys: i64 =
-        transaction.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-            row.get(0)
-        })?;
-    if invalid_foreign_keys != 0 {
-        return Err(StoreError::InvalidData(
-            "legacy state contains broken foreign keys".to_owned(),
-        ));
-    }
+    migrate_notification_history(transaction)?;
+    migrate_health(transaction)?;
     transaction.execute(
-        "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (2, 'durable-delivery', ?1, ?2)",
-        params![checksum(2), format!("{:.9}", jiff::Timestamp::now())],
+        "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (2, ?1, ?2, ?3)",
+        params![
+            migration_name(2),
+            checksum(2),
+            format!("{:.9}", jiff::Timestamp::now())
+        ],
     )?;
-    transaction.execute_batch("PRAGMA user_version = 2;")?;
-    transaction.commit()?;
     Ok(())
 }
 
@@ -223,7 +293,7 @@ fn rebuild_table(
     schema: &str,
     table: &str,
 ) -> Result<(), StoreError> {
-    let new_table = format!("{table}_v2");
+    let new_table = format!("{table}_rebuild");
     transaction.execute_batch(&table_sql(schema, table)?.replacen(
         &format!("CREATE TABLE {table} ("),
         &format!("CREATE TABLE {new_table} ("),

@@ -8,8 +8,8 @@ use sentinel_core::{
     ConditionState, ConditionTransition, Config, DeliveryAction, DeliveryActivity, DnsObservation,
     ExitReport, FilterObservation, Finding, NotificationReport, NotificationStatus,
     OperationalObservation, OutboxMessage, RewriteObservation, RunHealth, RunReport, TargetReport,
-    TargetRuntimeState, TargetSample, TargetStatus, TransitionKind, UpstreamObservation,
-    advance_condition,
+    TargetRuntimeState, TargetSample, TargetStatus, TransitionKind, UpstreamCounter,
+    UpstreamObservation, UpstreamSample, advance_condition,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -34,9 +34,9 @@ pub enum StoreError {
     #[error("state schema version {observed} is unsupported; expected {expected}")]
     UnsupportedVersion { observed: i64, expected: i64 },
     #[error(
-        "state schema v1 requires explicit migration; run migrate-state before check or report"
+        "state schema v{observed} requires explicit migration; run migrate-state before check or report"
     )]
-    MigrationRequired,
+    MigrationRequired { observed: i64 },
     #[error("unversioned nonempty SQLite state is not supported")]
     UnversionedState,
     #[error("cannot update state file permissions: {0}")]
@@ -86,7 +86,8 @@ pub struct StateStore {
 pub fn canonical_state_schema(version: u32) -> Result<String, StoreError> {
     match version {
         1 => Ok(schema::V1.to_owned()),
-        2 => Ok(schema::current_sql()),
+        2 => Ok(schema::v2_sql()),
+        3 => Ok(schema::current_sql()),
         version => Err(StoreError::UnsupportedVersion {
             observed: i64::from(version),
             expected: STATE_VERSION,
@@ -117,7 +118,7 @@ impl StateStore {
         Self::open_owned(path, false).map(|(store, _)| store)
     }
 
-    /// Explicitly upgrades released v1 state after creating a private backup.
+    /// Explicitly upgrades released v1 or v2 state after creating a private backup.
     pub fn migrate(path: &Path) -> Result<(Self, Option<PathBuf>), StoreError> {
         Self::open_owned(path, true)
     }
@@ -151,12 +152,12 @@ impl StateStore {
                 }
                 schema::initialize(&mut connection)?;
             }
-            1 if allow_migration => {
-                schema::validate(&connection, 1)?;
-                backup = Some(backup_version_one(&connection, path)?);
-                schema::migrate(&mut connection)?;
+            1 | 2 if allow_migration => {
+                schema::validate(&connection, version)?;
+                backup = Some(backup_before_migration(&connection, path, version)?);
+                schema::migrate(&mut connection, version)?;
             }
-            1 => return Err(StoreError::MigrationRequired),
+            1 | 2 => return Err(StoreError::MigrationRequired { observed: version }),
             STATE_VERSION => {}
             observed => {
                 return Err(StoreError::UnsupportedVersion {
@@ -258,6 +259,77 @@ impl StateStore {
             });
         }
         Ok(samples)
+    }
+
+    /// Loads complete targets' upstream counters from runs completed at or
+    /// after `since_unix_seconds`, oldest first.
+    ///
+    /// A reading recorded before state v3 has no response counts. It is
+    /// omitted rather than read as zero responses, so no latency window can
+    /// start from it.
+    pub fn load_upstream_samples(
+        &self,
+        since_unix_seconds: i64,
+    ) -> Result<Vec<UpstreamSample>, StoreError> {
+        let since = Timestamp::from_second(since_unix_seconds)
+            .map_err(|error| StoreError::InvalidData(format!("invalid timestamp: {error}")))?;
+        let mut statement = self.connection.prepare(
+            "SELECT r.started_at, r.completed_at, t.run_id, t.target_id,
+                    u.upstream_identity, u.average_seconds, u.responses
+             FROM target_observations t
+             JOIN runs r ON r.id = t.run_id
+             LEFT JOIN upstream_observations u ON u.run_id = t.run_id AND u.target_id = t.target_id
+             WHERE t.complete = 1 AND r.completed_at >= ?1
+             ORDER BY r.completed_at ASC, r.rowid ASC, t.target_id ASC, u.ordinal ASC",
+        )?;
+        let rows = statement
+            .query_map([canonical_timestamp(&since.to_string())?], |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<f64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        // (run, target) -> reading, or None once any counter is unknown.
+        let mut readings: Vec<((String, String), Option<UpstreamSample>)> = Vec::new();
+        for ((started_at, completed_at), run_id, target_id, identity, average, responses) in rows {
+            let key = (run_id, target_id.clone());
+            if readings.last().is_none_or(|(last, _)| *last != key) {
+                readings.push((
+                    key,
+                    Some(UpstreamSample {
+                        target_id,
+                        observation_started: parse_timestamp(&started_at)?,
+                        timestamp: parse_timestamp(&completed_at)?,
+                        upstreams: Vec::new(),
+                    }),
+                ));
+            }
+            let Some(identity) = identity else {
+                continue;
+            };
+            let entry = &mut readings.last_mut().expect("pushed above").1;
+            let counter = match (average, responses) {
+                (Some(average), Some(responses)) => UpstreamCounter::from_average(
+                    &identity,
+                    average,
+                    parse_counter(&responses, "upstream response count")?,
+                ),
+                _ => None,
+            };
+            match (entry.as_mut(), counter) {
+                (Some(sample), Some(counter)) => sample.upstreams.push(counter),
+                _ => *entry = None,
+            }
+        }
+        Ok(readings
+            .into_iter()
+            .filter_map(|(_, sample)| sample)
+            .collect())
     }
 
     pub fn target_runtime_state(
@@ -886,15 +958,19 @@ impl StateStore {
 
 fn validate_schema(connection: &Connection) -> Result<(), StoreError> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 1 {
-        return Err(StoreError::MigrationRequired);
+    if (1..STATE_VERSION).contains(&version) {
+        return Err(StoreError::MigrationRequired { observed: version });
     }
     schema::validate(connection, STATE_VERSION)
 }
 
-fn backup_version_one(connection: &Connection, path: &Path) -> Result<PathBuf, StoreError> {
+fn backup_before_migration(
+    connection: &Connection,
+    path: &Path,
+    version: i64,
+) -> Result<PathBuf, StoreError> {
     let mut name = path.as_os_str().to_os_string();
-    name.push(format!(".v1-{}.bak", Uuid::new_v4()));
+    name.push(format!(".v{version}-{}.bak", Uuid::new_v4()));
     let backup = PathBuf::from(name);
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create_new(true);
@@ -911,7 +987,7 @@ fn backup_version_one(connection: &Connection, path: &Path) -> Result<PathBuf, S
             .ok_or_else(|| StoreError::InvalidData("backup path is not UTF-8".to_owned()))?],
     )?;
     let saved = Connection::open_with_flags(&backup, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    schema::validate(&saved, 1)?;
+    schema::validate(&saved, version)?;
     drop(saved);
     file.sync_all()?;
     Ok(backup)
@@ -1006,14 +1082,15 @@ fn insert_targets(transaction: &Transaction<'_>, report: &RunReport) -> Result<(
         for (ordinal, upstream) in target.upstreams.iter().enumerate() {
             transaction.execute(
                 "INSERT INTO upstream_observations(
-                   run_id, target_id, ordinal, upstream_identity, average_seconds
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                   run_id, target_id, ordinal, upstream_identity, average_seconds, responses
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     report.run_id,
                     target.id,
                     i64_from_usize(ordinal)?,
                     upstream.identity,
                     upstream.average_seconds,
+                    upstream.responses.map(|count| count.to_string()),
                 ],
             )?;
         }
@@ -1602,18 +1679,29 @@ fn load_upstreams(
     target_id: &str,
 ) -> Result<Vec<UpstreamObservation>, StoreError> {
     let mut statement = connection.prepare(
-        "SELECT upstream_identity, average_seconds FROM upstream_observations
+        "SELECT upstream_identity, average_seconds, responses FROM upstream_observations
          WHERE run_id = ?1 AND target_id = ?2 ORDER BY ordinal",
     )?;
-    statement
+    let rows = statement
         .query_map(params![run_id, target_id], |row| {
-            Ok(UpstreamObservation {
-                identity: row.get(0)?,
-                average_seconds: row.get(1)?,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(StoreError::from)
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(identity, average_seconds, responses)| {
+            Ok(UpstreamObservation {
+                identity,
+                average_seconds,
+                responses: responses
+                    .map(|count| parse_counter(&count, "upstream response count"))
+                    .transpose()?,
+            })
+        })
+        .collect()
 }
 
 fn load_filters(
@@ -1973,7 +2061,7 @@ mod tests {
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join("state.sqlite");
         let store = StateStore::open(&path).expect("store");
-        assert_eq!(store.schema_version(), 2);
+        assert_eq!(store.schema_version(), 3);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1993,7 +2081,7 @@ mod tests {
         let store = StateStore::open(&path).expect("store");
         store
             .connection
-            .execute_batch("PRAGMA user_version = 3")
+            .execute_batch("PRAGMA user_version = 4")
             .expect("set version");
         drop(store);
         let error = StateStore::open(&path).expect_err("future schema must fail");

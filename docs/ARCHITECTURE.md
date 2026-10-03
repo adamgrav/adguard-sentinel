@@ -43,7 +43,7 @@ and executing-run delivery snapshots remain separate.
 A canonical adjacent `.lock` file excludes other writers for the entire
 observation and delivery operation, including access through symlink aliases.
 Read-only reports use a SQLite snapshot and do not take writer ownership.
-The lock file stays in place when ownership is released. SQLite v2 stores
+The lock file stays in place when ownership is released. SQLite v3 stores
 unsigned counters losslessly and binds live/dry-run mode independently of run
 retention. [MIGRATION](MIGRATION.md) owns upgrades and backups.
 

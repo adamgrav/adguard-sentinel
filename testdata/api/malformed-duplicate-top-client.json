@@ -2,6 +2,7 @@
   "num_dns_queries": 5000,
   "num_blocked_filtering": 1250,
   "avg_processing_time": 0.0182,
+  "top_upstreams_responses": [],
   "top_upstreams_avg_time": [],
   "top_clients": [
     {"192.0.2.10": 3100},

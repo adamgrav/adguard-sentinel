@@ -12,7 +12,7 @@ use crate::config::{
 use crate::model::{
     AggregateObservation, AlertDeliveryState, ConditionEvaluation, ConditionLifecycle,
     ConditionState, ConditionTransition, EvaluationOutcome, OperationalObservation, Severity,
-    TargetReport, TargetSample, TargetStatus, TransitionKind,
+    TargetReport, TargetSample, TargetStatus, TransitionKind, UpstreamCounter, UpstreamSample,
 };
 
 #[derive(Clone, Debug)]
@@ -40,6 +40,15 @@ const QUERY_RATE_DEVIATION_MULTIPLE: f64 = 4.0;
 const BLOCKED_RATIO_DEVIATION_MULTIPLE: f64 = 6.0;
 const BLOCKED_RATIO_MINIMUM_DEVIATION: f64 = 0.04;
 const BLOCKING_COLLAPSE_FRACTION: f64 = 0.25;
+/// Upstream latency pools the measurement windows ending this recently.
+const UPSTREAM_LOOKBACK_SECONDS: i64 = 1_800;
+/// Responses an upstream needs within the lookback before its average counts.
+const UPSTREAM_MINIMUM_RESPONSES: u64 = 20;
+/// How far back a check needs upstream readings: the lookback plus the longest
+/// window, so the oldest pooled window still has its starting reading.
+pub const UPSTREAM_HISTORY_SECONDS: i64 = UPSTREAM_LOOKBACK_SECONDS + 600;
+/// `AdGuard Home` starts a new statistics unit on each UTC epoch hour.
+const STATISTICS_UNIT_SECONDS: i64 = 3_600;
 
 /// One measurement window between two consecutive aggregate samples.
 ///
@@ -334,18 +343,6 @@ pub fn evaluate_target(
         profile.processing_latency_sustain_runs,
         profile.recovery_runs,
     ));
-    evaluations.push(threshold_evaluation(
-        format!("target:{}:upstream-latency", target.id),
-        target,
-        "upstream_latency",
-        operational.maximum_upstream_seconds,
-        profile.upstream_latency_ms as f64 / 1_000.0,
-        format!("{} has a persistently slow upstream", target.name),
-        format!("{} upstream latency is within threshold", target.name),
-        "GET /control/stats top_upstreams_avg_time",
-        profile.upstream_latency_sustain_runs,
-        profile.recovery_runs,
-    ));
     if let Some(policy) = policy {
         evaluate_dns_policy(target, policy, profile, report, &mut evaluations);
         evaluate_filters(
@@ -359,6 +356,227 @@ pub fn evaluate_target(
         evaluate_rewrites(target, policy, profile, report, &mut evaluations);
     }
     evaluations
+}
+
+/// Per-upstream response totals accumulated over measurement windows.
+#[derive(Clone, Copy, Debug, Default)]
+struct UpstreamTotals {
+    responses: u64,
+    total_microseconds: u64,
+}
+
+impl UpstreamTotals {
+    fn average_seconds(self) -> Option<f64> {
+        (self.responses > 0)
+            .then(|| self.total_microseconds as f64 / self.responses as f64 / 1_000_000.0)
+    }
+}
+
+/// The `AdGuard Home` statistics unit a reading was taken in, or `None` when
+/// its run spanned a unit boundary and the read could lie on either side.
+fn statistics_unit(sample: &UpstreamSample) -> Option<i64> {
+    let unit = sample.timestamp.div_euclid(STATISTICS_UNIT_SECONDS);
+    (sample
+        .observation_started
+        .div_euclid(STATISTICS_UNIT_SECONDS)
+        == unit)
+        .then_some(unit)
+}
+
+/// Differences two readings of one target's cumulative upstream counters.
+///
+/// Returns the elapsed seconds and each upstream's responses and summed
+/// duration between the readings. An upstream absent from a reading has no
+/// responses in that statistics unit yet. Returns `None` unless both readings
+/// were certainly taken in the same statistics unit, and when any counter
+/// decreases or the gap is nonpositive or exceeds `RATE_WINDOW_MAXIMUM_SECONDS`:
+/// those pairs can span a reset or missed runs. Counters alone cannot detect a
+/// reset, because a rarely used upstream can answer more queries just after
+/// the hour than it had before it.
+fn upstream_window(
+    previous: &UpstreamSample,
+    current: &UpstreamSample,
+) -> Option<(i64, BTreeMap<String, UpstreamTotals>)> {
+    let elapsed = current.timestamp - previous.timestamp;
+    if elapsed <= 0
+        || elapsed as f64 > RATE_WINDOW_MAXIMUM_SECONDS
+        || statistics_unit(previous)? != statistics_unit(current)?
+    {
+        return None;
+    }
+    let find = |sample: &UpstreamSample, identity: &str| {
+        sample
+            .upstreams
+            .iter()
+            .find(|counter| counter.identity == identity)
+            .map_or((0, 0), |counter| {
+                (counter.responses, counter.total_microseconds)
+            })
+    };
+    let identities: BTreeSet<&str> = previous
+        .upstreams
+        .iter()
+        .chain(&current.upstreams)
+        .map(|counter| counter.identity.as_str())
+        .collect();
+    let mut totals = BTreeMap::new();
+    for identity in identities {
+        let (previous_responses, previous_total) = find(previous, identity);
+        let (current_responses, current_total) = find(current, identity);
+        totals.insert(
+            identity.to_owned(),
+            UpstreamTotals {
+                responses: current_responses.checked_sub(previous_responses)?,
+                total_microseconds: current_total.checked_sub(previous_total)?,
+            },
+        );
+    }
+    Some((elapsed, totals))
+}
+
+/// The current reading of a complete target's upstream counters, or `None`
+/// when a count is absent or an average cannot be converted back into a sum.
+fn current_upstream_sample(
+    report: &TargetReport,
+    observation_started: i64,
+    timestamp: i64,
+) -> Option<UpstreamSample> {
+    let upstreams = report
+        .upstreams
+        .iter()
+        .map(|upstream| {
+            UpstreamCounter::from_average(
+                &upstream.identity,
+                upstream.average_seconds,
+                upstream.responses?,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(UpstreamSample {
+        target_id: report.id.clone(),
+        observation_started,
+        timestamp,
+        upstreams,
+    })
+}
+
+/// Upstream latency for one complete target, pooled over the windows ending
+/// within `UPSTREAM_LOOKBACK_SECONDS`; ADR 0013 records the design.
+///
+/// `history` holds earlier readings oldest first; readings for other targets
+/// are ignored. The current run started at `started_unix_seconds` and completed
+/// at `now_unix_seconds`. Returns nothing for an incomplete target, whose
+/// condition then retains its latch under ADR 0011.
+pub fn evaluate_upstream_latency(
+    target: &TargetConfig,
+    profile: &ConditionProfile,
+    report: &TargetReport,
+    history: &[UpstreamSample],
+    started_unix_seconds: i64,
+    now_unix_seconds: i64,
+) -> Vec<ConditionEvaluation> {
+    if !report.complete || report.operational.is_none() {
+        return Vec::new();
+    }
+    let maximum = profile.upstream_latency_ms as f64 / 1_000.0;
+    let expected = json!({
+        "maximum_seconds": maximum,
+        "comparison": "strictly_greater",
+        "minimum_responses": UPSTREAM_MINIMUM_RESPONSES,
+        "lookback_seconds": UPSTREAM_LOOKBACK_SECONDS,
+    });
+    let current = current_upstream_sample(report, started_unix_seconds, now_unix_seconds);
+    let mut readings: Vec<&UpstreamSample> = history
+        .iter()
+        .filter(|sample| sample.target_id == report.id && sample.timestamp < now_unix_seconds)
+        .collect();
+    readings.extend(current.as_ref());
+    let start = now_unix_seconds - UPSTREAM_LOOKBACK_SECONDS;
+    let mut pooled: BTreeMap<String, UpstreamTotals> = BTreeMap::new();
+    let mut window_seconds = 0;
+    if current.is_some() {
+        for pair in readings.windows(2).filter(|pair| pair[1].timestamp > start) {
+            let Some((elapsed, totals)) = upstream_window(pair[0], pair[1]) else {
+                continue;
+            };
+            window_seconds += elapsed;
+            for (identity, window) in totals {
+                let entry = pooled.entry(identity).or_default();
+                entry.responses = entry.responses.saturating_add(window.responses);
+                entry.total_microseconds = entry
+                    .total_microseconds
+                    .saturating_add(window.total_microseconds);
+            }
+        }
+    }
+    let upstreams: Vec<Value> = pooled
+        .iter()
+        .map(|(identity, totals)| {
+            json!({
+                "identity": identity,
+                "responses": totals.responses,
+                "average_seconds": totals.average_seconds(),
+            })
+        })
+        .collect();
+    let slowest = pooled
+        .iter()
+        .filter(|(_, totals)| totals.responses >= UPSTREAM_MINIMUM_RESPONSES)
+        .filter_map(|(identity, totals)| {
+            Some((identity, totals.responses, totals.average_seconds()?))
+        })
+        .max_by(|left, right| left.2.total_cmp(&right.2).then_with(|| right.0.cmp(left.0)));
+    let verdict = match slowest {
+        _ if window_seconds == 0 => Verdict::not_evaluated(
+            "window_unavailable",
+            format!(
+                "{} upstream latency has no measurement window yet",
+                target.name
+            ),
+        ),
+        None => Verdict::not_evaluated(
+            "insufficient_responses",
+            format!(
+                "{} upstreams gave too few responses to judge latency",
+                target.name
+            ),
+        ),
+        Some((identity, responses, seconds)) => Verdict::from_flag(
+            seconds > maximum,
+            (
+                "above_threshold",
+                format!(
+                    "{} upstream {identity} is persistently slow: {:.0} ms average over {responses} responses",
+                    target.name,
+                    seconds * 1_000.0
+                ),
+            ),
+            (
+                "within_threshold",
+                format!("{} upstream latency is within threshold", target.name),
+            ),
+        ),
+    };
+    let observed = json!({
+        "seconds": slowest.map(|(_, _, seconds)| seconds),
+        "upstream": slowest.map(|(identity, _, _)| identity),
+        "responses": slowest.map(|(_, responses, _)| responses),
+        "window_seconds": window_seconds,
+        "upstreams": upstreams,
+    });
+    vec![evaluation(
+        format!("target:{}:upstream-latency", target.id),
+        Some(target.id.clone()),
+        "upstream_latency",
+        Severity::Warning,
+        verdict,
+        expected,
+        observed,
+        "GET /control/stats top_upstreams_responses and top_upstreams_avg_time, differenced between runs",
+        true,
+        profile.upstream_latency_sustain_runs,
+        profile.recovery_runs,
+    )]
 }
 
 fn evaluate_dns_policy(
@@ -1329,6 +1547,7 @@ mod tests {
         AlertDeliveryState, ConditionEvaluation, ConditionLifecycle, ConditionState,
         DnsObservation, EvaluationOutcome, FilterObservation, OperationalObservation,
         RewriteObservation, Severity, TargetReport, TargetSample, TargetStatus, TransitionKind,
+        UpstreamCounter, UpstreamObservation, UpstreamSample,
     };
 
     /// Condition identifiers embed this hash and latch state is keyed on the
@@ -1750,7 +1969,6 @@ mod tests {
         let mut report = target("a", 100, 10);
         let operational = report.operational.as_mut().expect("operational");
         operational.average_processing_seconds = 0.5;
-        operational.maximum_upstream_seconds = 0.75;
         let at_limit = super::evaluate_target(
             &target_config,
             Some(&policy),
@@ -1761,18 +1979,12 @@ mod tests {
         assert!(
             at_limit
                 .iter()
-                .filter(|evaluation| {
-                    matches!(
-                        evaluation.kind.as_str(),
-                        "processing_latency" | "upstream_latency"
-                    )
-                })
+                .filter(|evaluation| evaluation.kind == "processing_latency")
                 .all(|evaluation| evaluation.outcome == EvaluationOutcome::Clear)
         );
         let operational = report.operational.as_mut().expect("operational");
         operational.protection_enabled = false;
         operational.average_processing_seconds = 0.500_001;
-        operational.maximum_upstream_seconds = 0.750_001;
         let above = super::evaluate_target(
             &target_config,
             Some(&policy),
@@ -1789,12 +2001,7 @@ mod tests {
         assert!(
             above
                 .iter()
-                .filter(|evaluation| {
-                    matches!(
-                        evaluation.kind.as_str(),
-                        "processing_latency" | "upstream_latency"
-                    )
-                })
+                .filter(|evaluation| evaluation.kind == "processing_latency")
                 .all(|evaluation| evaluation.outcome == EvaluationOutcome::Active
                     && evaluation.sustain_runs == 4)
         );
@@ -1819,7 +2026,6 @@ mod tests {
             [
                 ("target:a:api", "api"),
                 ("target:a:processing-latency", "processing_latency"),
-                ("target:a:upstream-latency", "upstream_latency"),
             ]
         );
         assert!(
@@ -2913,6 +3119,278 @@ mod tests {
                 .iter()
                 .all(|item| item.outcome == EvaluationOutcome::NotEvaluated),
             "a reset must not increment, clear, or resolve a latch",
+        );
+    }
+
+    /// 10:00:00 UTC, the start of an `AdGuard Home` statistics unit.
+    const UNIT_START: i64 = 1_800_007_200;
+
+    fn upstream_sample(timestamp: i64, counters: &[(&str, u64, u64)]) -> UpstreamSample {
+        UpstreamSample {
+            target_id: "a".to_owned(),
+            observation_started: timestamp,
+            timestamp,
+            upstreams: counters
+                .iter()
+                .map(
+                    |(identity, responses, total_microseconds)| UpstreamCounter {
+                        identity: (*identity).to_owned(),
+                        responses: *responses,
+                        total_microseconds: *total_microseconds,
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    fn upstream_report(counters: &[(&str, u64, f64)]) -> TargetReport {
+        let mut report = target("a", 100, 10);
+        report.upstreams = counters
+            .iter()
+            .map(
+                |(identity, responses, average_seconds)| UpstreamObservation {
+                    identity: (*identity).to_owned(),
+                    average_seconds: *average_seconds,
+                    responses: Some(*responses),
+                },
+            )
+            .collect();
+        report
+    }
+
+    fn upstream_latency(
+        report: &TargetReport,
+        history: &[UpstreamSample],
+        now: i64,
+    ) -> ConditionEvaluation {
+        let mut evaluations = super::evaluate_upstream_latency(
+            &target_config(),
+            &profile(),
+            report,
+            history,
+            now,
+            now,
+        );
+        assert_eq!(evaluations.len(), 1);
+        evaluations.remove(0)
+    }
+
+    #[test]
+    fn a_few_slow_responses_early_in_the_hour_do_not_make_an_upstream_slow() {
+        // The partial-hour bucket an hour's first minutes produce: a rarely
+        // selected upstream averages 1.7 s over five responses. Comparing that raw
+        // value with the threshold made the condition fire until the hour ended.
+        let history = [upstream_sample(
+            UNIT_START + 60,
+            &[
+                ("tls://fast.invalid", 40, 800_000),
+                ("tls://slow.invalid", 2, 3_400_000),
+            ],
+        )];
+        let report = upstream_report(&[
+            ("tls://fast.invalid", 140, 0.02),
+            ("tls://slow.invalid", 5, 1.7),
+        ]);
+
+        let evaluation = upstream_latency(&report, &history, UNIT_START + 360);
+
+        assert_eq!(evaluation.outcome, EvaluationOutcome::Clear);
+        assert_eq!(evaluation.observed["upstream"], "tls://fast.invalid");
+        assert_eq!(evaluation.observed["upstreams"][1]["responses"], 3);
+    }
+
+    #[test]
+    fn pooled_windows_name_the_slowest_upstream_with_enough_responses() {
+        let history = [
+            upstream_sample(
+                UNIT_START + 60,
+                &[
+                    ("tls://fast.invalid", 100, 2_000_000),
+                    ("tls://slow.invalid", 10, 9_000_000),
+                ],
+            ),
+            upstream_sample(
+                UNIT_START + 360,
+                &[
+                    ("tls://fast.invalid", 200, 4_000_000),
+                    ("tls://slow.invalid", 25, 22_500_000),
+                ],
+            ),
+        ];
+        let report = upstream_report(&[
+            ("tls://fast.invalid", 300, 0.02),
+            ("tls://slow.invalid", 40, 0.9),
+        ]);
+
+        let evaluation = upstream_latency(&report, &history, UNIT_START + 660);
+
+        assert_eq!(evaluation.outcome, EvaluationOutcome::Active);
+        assert_eq!(evaluation.reason, "above_threshold");
+        assert_eq!(evaluation.observed["upstream"], "tls://slow.invalid");
+        assert_eq!(evaluation.observed["responses"], 30);
+        assert_eq!(evaluation.observed["window_seconds"], 600);
+        assert_eq!(
+            evaluation.summary,
+            "Resolver A upstream tls://slow.invalid is persistently slow: 900 ms average over 30 responses"
+        );
+    }
+
+    #[test]
+    fn pooled_upstream_latency_at_the_threshold_is_clear() {
+        let history = [upstream_sample(
+            UNIT_START + 60,
+            &[("tls://a.invalid", 0, 0)],
+        )];
+        let report = upstream_report(&[("tls://a.invalid", 20, 0.75)]);
+
+        let evaluation = upstream_latency(&report, &history, UNIT_START + 360);
+
+        assert_eq!(evaluation.outcome, EvaluationOutcome::Clear);
+        assert_eq!(evaluation.observed["seconds"], 0.75);
+    }
+
+    #[test]
+    fn windows_across_a_statistics_unit_or_a_counter_reset_are_excluded() {
+        let report = upstream_report(&[("tls://a.invalid", 30, 1.0)]);
+        // The earlier reading belongs to the previous hour's unit.
+        let across_unit = [upstream_sample(
+            UNIT_START - 60,
+            &[("tls://a.invalid", 1, 1_000)],
+        )];
+        // A decreasing counter means the statistics were reset in between.
+        let reset = [upstream_sample(
+            UNIT_START + 60,
+            &[("tls://a.invalid", 50, 1_000)],
+        )];
+        // Readings more than 600 seconds apart span missed runs.
+        let gap = [upstream_sample(
+            UNIT_START + 60,
+            &[("tls://a.invalid", 1, 1_000)],
+        )];
+
+        for (history, now) in [
+            (&across_unit[..], UNIT_START + 240),
+            (&reset[..], UNIT_START + 360),
+            (&gap[..], UNIT_START + 900),
+        ] {
+            let evaluation = upstream_latency(&report, history, now);
+            assert_eq!(evaluation.outcome, EvaluationOutcome::NotEvaluated);
+            assert_eq!(evaluation.reason, "window_unavailable");
+        }
+    }
+
+    #[test]
+    fn a_reading_from_a_run_spanning_the_hour_starts_no_window() {
+        // The previous run read its statistics at 09:59:58 but completed at
+        // 10:00:02. Its 100 responses belong to the old unit; the new unit's 120
+        // responses must not be differenced against them.
+        let mut previous = upstream_sample(UNIT_START + 2, &[("tls://a.invalid", 100, 10_000_000)]);
+        previous.observation_started = UNIT_START - 2;
+        let report = upstream_report(&[("tls://a.invalid", 120, 0.5)]);
+
+        let evaluation = upstream_latency(&report, &[previous], UNIT_START + 302);
+
+        assert_eq!(evaluation.outcome, EvaluationOutcome::NotEvaluated);
+        assert_eq!(evaluation.reason, "window_unavailable");
+    }
+
+    #[test]
+    fn one_slow_burst_stays_in_the_pool_until_it_leaves_the_lookback() {
+        // Twenty slow responses in one window, then none from that upstream.
+        // The pooled average stays above the threshold for every later run in
+        // the lookback, so the burst alone can satisfy the sustain count.
+        let mut history = vec![
+            upstream_sample(UNIT_START + 60, &[("tls://a.invalid", 0, 0)]),
+            upstream_sample(UNIT_START + 360, &[("tls://a.invalid", 20, 20_000_000)]),
+        ];
+        for run in 2..=7 {
+            let now = UNIT_START + 60 + run * 300;
+            let evaluation = upstream_latency(
+                &upstream_report(&[("tls://a.invalid", 20, 1.0)]),
+                &history,
+                now,
+            );
+            let expected = if now - (UNIT_START + 360) < 1_800 {
+                EvaluationOutcome::Active
+            } else {
+                EvaluationOutcome::NotEvaluated
+            };
+            assert_eq!(evaluation.outcome, expected, "run ending at {now}");
+            history.push(upstream_sample(now, &[("tls://a.invalid", 20, 20_000_000)]));
+        }
+    }
+
+    #[test]
+    fn too_few_responses_leave_upstream_latency_not_evaluated() {
+        let history = [upstream_sample(
+            UNIT_START + 60,
+            &[("tls://a.invalid", 0, 0)],
+        )];
+        let report = upstream_report(&[("tls://a.invalid", 19, 2.0)]);
+
+        let evaluation = upstream_latency(&report, &history, UNIT_START + 360);
+
+        assert_eq!(evaluation.outcome, EvaluationOutcome::NotEvaluated);
+        assert_eq!(evaluation.reason, "insufficient_responses");
+    }
+
+    #[test]
+    fn an_upstream_first_seen_mid_unit_counts_from_zero() {
+        let history = [upstream_sample(UNIT_START + 60, &[])];
+        let report = upstream_report(&[("tls://new.invalid", 25, 0.8)]);
+
+        let evaluation = upstream_latency(&report, &history, UNIT_START + 360);
+
+        assert_eq!(evaluation.outcome, EvaluationOutcome::Active);
+        assert_eq!(evaluation.observed["responses"], 25);
+    }
+
+    #[test]
+    fn windows_older_than_the_lookback_are_not_pooled() {
+        // A slow window that ended 30 minutes ago must not keep the condition active.
+        let mut history = vec![
+            upstream_sample(UNIT_START + 60, &[("tls://a.invalid", 0, 0)]),
+            upstream_sample(UNIT_START + 360, &[("tls://a.invalid", 100, 200_000_000)]),
+        ];
+        let mut responses = 100;
+        for slot in 2..=7 {
+            responses += 20;
+            history.push(upstream_sample(
+                UNIT_START + 60 + slot * 300,
+                &[(
+                    "tls://a.invalid",
+                    responses,
+                    200_000_000 + (responses - 100) * 10_000,
+                )],
+            ));
+        }
+        let now = UNIT_START + 60 + 8 * 300;
+        let total = 200_000_000 + (responses + 20 - 100) * 10_000;
+        let average = total as f64 / f64::from(u32::try_from(responses + 20).expect("count")) / 1e6;
+        let report = upstream_report(&[("tls://a.invalid", responses + 20, average)]);
+
+        let evaluation = upstream_latency(&report, &history, now);
+
+        assert_eq!(evaluation.outcome, EvaluationOutcome::Clear);
+        assert_eq!(evaluation.observed["responses"], 120);
+        assert_eq!(evaluation.observed["window_seconds"], 1_800);
+    }
+
+    #[test]
+    fn an_incomplete_target_produces_no_upstream_latency_evaluation() {
+        let mut report = upstream_report(&[("tls://a.invalid", 25, 0.8)]);
+        report.complete = false;
+
+        assert!(
+            super::evaluate_upstream_latency(
+                &target_config(),
+                &profile(),
+                &report,
+                &[],
+                UNIT_START,
+                UNIT_START
+            )
+            .is_empty()
         );
     }
 

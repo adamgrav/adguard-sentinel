@@ -32,6 +32,7 @@ BODIES = {
     "/control/stats": {
         "num_dns_queries": 5000, "num_blocked_filtering": 1250,
         "avg_processing_time": 0.018,
+        "top_upstreams_responses": [{"https://dns.example.invalid/dns-query": 3000}],
         "top_upstreams_avg_time": [{"https://dns.example.invalid/dns-query": 0.024}],
         "top_clients": [{"192.0.2.10": 5000}],
     },
@@ -399,8 +400,8 @@ AccuracySec=100ms
         require(legacy_state.stat().st_uid != 0, "legacy state was created as root")
         transient("migration", self.binary, "migrate-state", "--state", legacy_state)
         with sqlite3.connect(f"file:{legacy_state}?mode=ro", uri=True) as database:
-            require(database.execute("PRAGMA user_version").fetchone()[0] == 2,
-                    "service-user migration did not produce v2 state")
+            require(database.execute("PRAGMA user_version").fetchone()[0] == 3,
+                    "service-user migration did not produce v3 state")
         backups = list(legacy_state.parent.glob("legacy.sqlite.v1-*.bak"))
         require(len(backups) == 1, "migration did not create one v1 backup")
         with sqlite3.connect(f"file:{backups[0]}?mode=ro", uri=True) as database:

@@ -5,6 +5,39 @@ Notable changes to AdGuard Sentinel. The format follows
 
 ## Unreleased
 
+### Changed
+
+- Upstream latency compares response windows differenced between runs and
+  pooled over 30 minutes, instead of `AdGuard Home`'s average since the start of
+  the current hour. Upstreams with fewer than 20 pooled responses are not
+  compared. This removes alerts caused by a few slow responses early in an hour
+  that resolved when the hour ended. The active summary names the upstream, its
+  average, and its response count. `upstream_latency` gains the
+  `window_unavailable` and `insufficient_responses` not-evaluated reasons; see
+  [ADR 0013](docs/decisions/0013-upstream-latency-measures-pooled-windows.md).
+- Human output shows the slowest compared upstream as `upstream_slowest=<ms>/<responses>`,
+  or the not-evaluated reason, in place of the raw `upstream_max`.
+
+### Added
+
+- Per-upstream response counts from `top_upstreams_responses`, retained in
+  reports as `targets[].upstreams[].responses`. An upstream average without a
+  positive count makes the observation incomplete, except at `AdGuard Home`'s
+  100-entry list limit, where counts may be truncated and are recorded as
+  unknown.
+
+### Security
+
+- `rustls` 0.23.45 fixes RUSTSEC-2026-0285, in which TLS 1.3 handshake messages
+  were accepted across encryption level boundaries. It secures connections to
+  AdGuard Home and Pushover.
+
+### Upgrade
+
+SQLite advances to v3. Run `migrate-state` explicitly before using v1 or v2
+state; it creates a private, verified backup named after the original version.
+Upstream latency is not evaluated until two complete v3 runs exist.
+
 ## 0.4.0 — 2026-09-09
 
 ### Added

@@ -100,8 +100,8 @@ recorded rejection. Retain the database to preserve history and latches.
 | --- | --- |
 | `state parent directory does not exist` | Create the directory, or use the service's `StateDirectory` |
 | `cannot open or use state database` | Check ownership and writable paths; use the service identity or privileged reporting for private state |
-| `state schema v1 requires explicit migration` | Stop writers and follow [MIGRATION](MIGRATION.md) |
-| `state schema version N is unsupported; expected 2` | Check the binary and state versions; only v1-to-v2 migration is supported |
+| `state schema vN requires explicit migration` | Stop writers and follow [MIGRATION](MIGRATION.md) |
+| `state schema version N is unsupported; expected 3` | Check the binary and state versions; only migration from v1 or v2 to v3 is supported |
 | `state database is already in use` | Wait for the existing check or migration to finish; overlapping checks fail before resolver requests |
 | `unversioned nonempty SQLite state is not supported` | Select a dedicated Sentinel database |
 | Database bound to a different run mode | Give live and dry-run observations separate databases |
