@@ -5,6 +5,12 @@ Notable changes to AdGuard Sentinel. The format follows
 
 ## Unreleased
 
+### Security
+
+- `rustls` 0.23.45 fixes RUSTSEC-2026-0285, in which TLS 1.3 handshake messages
+  were accepted across encryption level boundaries. It secures connections to
+  AdGuard Home and Pushover.
+
 ## 0.4.0 — 2026-09-09
 
 ### Added
