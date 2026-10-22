@@ -618,7 +618,7 @@ fn maximum_unsigned_counts_survive_observation_sqlite_and_cli_json() {
             })
         })
         .collect::<Vec<_>>();
-    let harness = Harness::new(&adguard.base_url());
+    let harness = Harness::new(&format!("http://{}", adguard.address()));
     let mut config = fs::read_to_string(&harness.config).expect("config");
     write!(
         config,
