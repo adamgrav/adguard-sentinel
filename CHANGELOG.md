@@ -5,6 +5,18 @@ Notable changes to AdGuard Sentinel. The format follows
 
 ## Unreleased
 
+### Security
+
+- Update `rustls` to 0.23.46, `rustls-webpki` to 0.103.16, and
+  `webpki-roots` to 1.0.10, fixing RUSTSEC-2026-0346 through
+  RUSTSEC-2026-0349, RUSTSEC-2026-0381, and RUSTSEC-2026-0382.
+
+### Changed
+
+- Refresh Cargo dependencies, including reqwest 0.13, httpmock 0.9, and
+  jsonschema 0.59. HTTPS retains bundled trust roots and the ring provider.
+- Update bundled IANA time-zone data from 2026c to 2026e.
+
 ## 0.5.0 — 2026-10-03
 
 ### Changed

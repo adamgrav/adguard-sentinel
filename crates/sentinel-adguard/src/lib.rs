@@ -94,7 +94,17 @@ impl ReqwestAdGuardClient {
                 detail: format!("invalid version requirement: {error}"),
             }
         })?;
+        // Keep bundled roots and ring when reqwest defaults to platform verification.
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(
+                webpki_roots::TLS_SERVER_ROOTS
+                    .iter()
+                    .cloned()
+                    .collect::<rustls::RootCertStore>(),
+            )
+            .with_no_client_auth();
         let client = Client::builder()
+            .tls_backend_preconfigured(tls)
             .timeout(Duration::from_millis(request_timeout_ms))
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
@@ -754,7 +764,7 @@ mod tests {
     ) -> Result<TargetReport, AdGuardError> {
         client
             .observe(
-                &target(server.base_url()),
+                &target(format!("http://{}", server.address())),
                 Some(&example_policy()),
                 Some(&SecretString::from("synthetic".to_owned())),
                 LOOKBACK_MS,
@@ -785,6 +795,44 @@ mod tests {
 
     fn dns_of(body: &str) -> DnsResponse {
         serde_json::from_str(body).expect("dns fixture parses")
+    }
+
+    #[tokio::test]
+    async fn rejects_an_untrusted_tls_certificate_before_sending_credentials() {
+        let server = MockServer::start_async().await;
+        let mocks = serve(&server, &golden_bodies()).await;
+        let client = bounded_client(TIMEOUT_MS, MAX_BYTES);
+
+        let error = client
+            .observe(
+                &target(server.base_url()),
+                Some(&example_policy()),
+                Some(&SecretString::from("synthetic".to_owned())),
+                LOOKBACK_MS,
+                NOW,
+            )
+            .await
+            .expect_err("untrusted certificate");
+        assert!(matches!(error, AdGuardError::Unavailable { .. }));
+        for mock in &mocks {
+            mock.assert_calls_async(0).await;
+        }
+
+        let certificate =
+            reqwest::Certificate::from_pem(httpmock::server::DEFAULT_CA_CERTIFICATE.as_bytes())
+                .expect("synthetic CA");
+        let trusted = reqwest::Client::builder()
+            .tls_certs_only([certificate])
+            .no_proxy()
+            .build()
+            .expect("control client");
+        let response = trusted
+            .get(server.url(STATUS_PATH))
+            .send()
+            .await
+            .expect("TLS works when the synthetic CA is trusted");
+        assert!(response.status().is_success());
+        mocks[0].assert_calls_async(1).await;
     }
 
     #[tokio::test]
@@ -904,7 +952,7 @@ mod tests {
                     .await,
             );
         }
-        let mut target = target(server.base_url());
+        let mut target = target(format!("http://{}", server.address()));
         target.auth = TargetAuth::None;
         target.username = None;
         target.password_file = None;

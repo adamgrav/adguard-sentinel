@@ -197,7 +197,10 @@ fn assert_valid(validator: &Validator, report: &Value) {
 fn produced_reports_validate_recursively_and_json_jsonl_and_storage_agree() {
     let server = MockServer::start();
     let mocks = golden(&server);
-    let harness = Harness::new(&server.base_url(), &server.base_url());
+    let harness = Harness::new(
+        &format!("http://{}", server.address()),
+        &format!("http://{}", server.address()),
+    );
     let validator = report_validator();
     let first = value(&harness.check("json"));
     assert_valid(&validator, &first);
@@ -284,7 +287,10 @@ fn incomplete_group_preserves_complete_members_independent_evaluations() {
         when.method(GET).path("/control/status");
         then.status(503);
     });
-    let harness = Harness::new(&healthy.base_url(), &unavailable.base_url());
+    let harness = Harness::new(
+        &format!("http://{}", healthy.address()),
+        &format!("http://{}", unavailable.address()),
+    );
     let report = value(&harness.check("json"));
     assert_valid(&report_validator(), &report);
     assert_eq!(report["run_status"], "partial");
@@ -337,7 +343,7 @@ fn schema_validation_refuses_external_retrieval() {
         when.method(GET).path("/schema");
         then.status(200).json_body(json!({"type": "string"}));
     });
-    assert!(validator(&json!({"$ref": format!("{}/schema", server.base_url())})).is_err());
+    assert!(validator(&json!({"$ref": format!("http://{}/schema", server.address())})).is_err());
     remote.assert_calls(0);
     assert!(validator(&json!({"$ref": "file:///schema.json"})).is_err());
 }

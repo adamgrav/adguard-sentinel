@@ -992,7 +992,8 @@ allow_insecure_local_http = false
     ) -> Result<u8, CommandError> {
         let config = Config::load(&harness.config_path, false).expect("config");
         let sink =
-            PushoverClient::with_endpoint(&config, &pushover.base_url()).expect("pushover client");
+            PushoverClient::with_endpoint(&config, &format!("http://{}", pushover.address()))
+                .expect("pushover client");
         check_with_sink(
             &harness.config_path,
             false,
@@ -1038,7 +1039,7 @@ minimum_same_hour_samples = 36
         let server = MockServer::start_async().await;
         let mocks = serve_golden(&server).await;
         let harness = harness(
-            &server.base_url(),
+            &format!("http://{}", server.address()),
             DECLARED_MODE,
             1,
             Notifications::Disabled,
@@ -1079,7 +1080,7 @@ minimum_same_hour_samples = 36
         let server = MockServer::start_async().await;
         let mocks = serve_golden_replacing(&server, "/control/stats", STATS_BEFORE).await;
         let harness = harness(
-            &server.base_url(),
+            &format!("http://{}", server.address()),
             DECLARED_MODE,
             1,
             Notifications::Disabled,
@@ -1121,7 +1122,7 @@ minimum_same_hour_samples = 36
         let server = MockServer::start_async().await;
         let mocks = serve_golden(&server).await;
         let harness = harness(
-            &server.base_url(),
+            &format!("http://{}", server.address()),
             DECLARED_MODE,
             1,
             Notifications::Disabled,
@@ -1227,7 +1228,7 @@ minimum_same_hour_samples = 36
         let server = MockServer::start_async().await;
         let mocks = serve_golden(&server).await;
         let harness = harness(
-            &server.base_url(),
+            &format!("http://{}", server.address()),
             DECLARED_MODE,
             1,
             Notifications::Disabled,
@@ -1254,7 +1255,12 @@ minimum_same_hour_samples = 36
     async fn an_active_finding_exits_one_only_when_fail_on_matches() {
         let server = MockServer::start_async().await;
         let _mocks = serve_golden(&server).await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Disabled,
+        );
 
         let ignored = run(&harness, FailOn::Never).await.expect("run");
         assert_eq!(ignored, 0);
@@ -1284,7 +1290,12 @@ minimum_same_hour_samples = 36
     async fn a_withdrawn_declaration_retains_its_latch_instead_of_resolving() {
         let server = MockServer::start_async().await;
         let _mocks = serve_golden(&server).await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Disabled,
+        );
         let declaration = format!("upstream_mode = \"{DRIFTED_MODE}\"\n");
 
         run_at(&harness, "2027-01-15T08:00:00Z")
@@ -1385,7 +1396,7 @@ minimum_same_hour_samples = 36
         let server = MockServer::start_async().await;
         let _mocks = serve_golden(&server).await;
         let harness = harness(
-            &server.base_url(),
+            &format!("http://{}", server.address()),
             DECLARED_MODE,
             1,
             Notifications::Disabled,
@@ -1413,7 +1424,7 @@ minimum_same_hour_samples = 36
         let server = MockServer::start_async().await;
         let mocks = serve_golden(&server).await;
         let harness = harness(
-            &server.base_url(),
+            &format!("http://{}", server.address()),
             DECLARED_MODE,
             1,
             Notifications::PushoverWithAbsentSecrets,
@@ -1449,7 +1460,12 @@ minimum_same_hour_samples = 36
                     .body(r#"{"status":1,"request":"synthetic-request-id"}"#);
             })
             .await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Pushover,
+        );
 
         let code = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
             .await
@@ -1480,7 +1496,12 @@ minimum_same_hour_samples = 36
                 then.status(503);
             })
             .await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Pushover,
+        );
 
         let code = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
             .await
@@ -1512,7 +1533,12 @@ minimum_same_hour_samples = 36
                     .body(r#"{"status":1,"request":""}"#);
             })
             .await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Pushover,
+        );
 
         let first = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
             .await
@@ -1551,7 +1577,12 @@ minimum_same_hour_samples = 36
                     .body(r#"{"status":1,"request":"synthetic-request-id"}"#);
             })
             .await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Pushover,
+        );
 
         let code = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
             .await
@@ -1586,7 +1617,12 @@ minimum_same_hour_samples = 36
                     .body(r#"{"status":1,"request":"resolution-request-id"}"#);
             })
             .await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Pushover,
+        );
 
         assert_eq!(
             run_notifying(&harness, &pushover, "2027-01-15T08:00:00Z")
@@ -1639,7 +1675,12 @@ minimum_same_hour_samples = 36
                     .body(r#"{"status":1,"request":"synthetic-request-id"}"#);
             })
             .await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Disabled,
+        );
 
         assert_eq!(run(&harness, FailOn::Never).await.expect("disabled run"), 0);
         assert_eq!(
@@ -1703,7 +1744,12 @@ minimum_same_hour_samples = 36
         for dry_run in [true, false] {
             let server = MockServer::start_async().await;
             let _drifted = serve_golden(&server).await;
-            let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+            let harness = harness(
+                &format!("http://{}", server.address()),
+                DRIFTED_MODE,
+                1,
+                Notifications::Disabled,
+            );
             assert_eq!(
                 check(
                     &harness.config_path,
@@ -1778,6 +1824,43 @@ minimum_same_hour_samples = 36
     }
 
     #[tokio::test]
+    async fn rejects_an_untrusted_pushover_certificate_before_sending_secrets() {
+        let pushover = MockServer::start_async().await;
+        let accepted = pushover
+            .mock_async(|when, then| {
+                when.method(POST).path("/");
+                then.status(200)
+                    .json_body(serde_json::json!({"status": 1, "request": "synthetic-request"}));
+            })
+            .await;
+        let harness = unreachable_harness();
+        let outcome = pushover_client(&harness, &pushover.base_url(), 5_000)
+            .send(&alert_message())
+            .await;
+        assert!(matches!(
+            outcome,
+            NotificationAttemptOutcome::Retryable { .. }
+        ));
+        accepted.assert_calls_async(0).await;
+
+        let certificate =
+            reqwest::Certificate::from_pem(httpmock::server::DEFAULT_CA_CERTIFICATE.as_bytes())
+                .expect("synthetic CA");
+        let trusted = reqwest::Client::builder()
+            .tls_certs_only([certificate])
+            .no_proxy()
+            .build()
+            .expect("control client");
+        let response = trusted
+            .post(pushover.base_url())
+            .send()
+            .await
+            .expect("TLS works when the synthetic CA is trusted");
+        assert!(response.status().is_success());
+        accepted.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
     async fn an_oversized_notification_response_is_ambiguous() {
         let pushover = MockServer::start_async().await;
         let _oversized = pushover
@@ -1790,7 +1873,7 @@ minimum_same_hour_samples = 36
             .await;
         let harness = unreachable_harness();
 
-        let outcome = pushover_client(&harness, &pushover.base_url(), 5_000)
+        let outcome = pushover_client(&harness, &format!("http://{}", pushover.address()), 5_000)
             .send(&alert_message())
             .await;
 
@@ -1814,7 +1897,7 @@ minimum_same_hour_samples = 36
             .await;
         let harness = unreachable_harness();
 
-        let outcome = pushover_client(&harness, &pushover.base_url(), 50)
+        let outcome = pushover_client(&harness, &format!("http://{}", pushover.address()), 50)
             .send(&alert_message())
             .await;
 
@@ -1851,7 +1934,12 @@ minimum_same_hour_samples = 36
                     .body(r#"{"status":0,"request":"rejected-request-id","errors":["invalid"]}"#);
             })
             .await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Pushover);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Pushover,
+        );
 
         let code = run_notifying(&harness, &pushover, REFERENCE_INSTANT)
             .await
@@ -1879,7 +1967,7 @@ minimum_same_hour_samples = 36
             })
             .await;
         let harness = harness(
-            &server.base_url(),
+            &format!("http://{}", server.address()),
             DECLARED_MODE,
             1,
             Notifications::Disabled,
@@ -1944,7 +2032,7 @@ minimum_same_hour_samples = 36
             })
             .await;
         let harness = harness(
-            &server.base_url(),
+            &format!("http://{}", server.address()),
             DECLARED_MODE,
             1,
             Notifications::Disabled,
@@ -1967,7 +2055,12 @@ minimum_same_hour_samples = 36
     async fn persisted_reports_match_top_level_schema_properties_and_round_trip() {
         let server = MockServer::start_async().await;
         let _mocks = serve_golden(&server).await;
-        let harness = harness(&server.base_url(), DRIFTED_MODE, 1, Notifications::Disabled);
+        let harness = harness(
+            &format!("http://{}", server.address()),
+            DRIFTED_MODE,
+            1,
+            Notifications::Disabled,
+        );
         run(&harness, FailOn::Never).await.expect("run");
 
         let persisted = latest_report(&harness);

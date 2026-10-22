@@ -39,7 +39,17 @@ impl PushoverClient {
             .context("cannot load Pushover application token")?;
         let user_key =
             read_secret(&pushover.user_key_file).context("cannot load Pushover user key")?;
+        // Keep bundled roots and ring when reqwest defaults to platform verification.
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(
+                webpki_roots::TLS_SERVER_ROOTS
+                    .iter()
+                    .cloned()
+                    .collect::<rustls::RootCertStore>(),
+            )
+            .with_no_client_auth();
         let client = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls)
             .timeout(Duration::from_millis(
                 config.observation.notification_timeout_ms,
             ))
