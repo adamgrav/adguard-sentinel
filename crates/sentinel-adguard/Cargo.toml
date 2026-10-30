@@ -14,7 +14,7 @@ reqwest.workspace = true
 rustls.workspace = true
 secrecy.workspace = true
 semver.workspace = true
-sentinel-core = { version = "0.5.0", path = "../sentinel-core" }
+sentinel-core = { version = "0.5.1", path = "../sentinel-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
