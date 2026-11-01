@@ -33,7 +33,7 @@ webpki-roots.workspace = true
 
 [dev-dependencies]
 httpmock = { version = "0.9", features = ["https"] }
-jsonschema = { version = "0.59", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 tempfile = "3.21"
 
 [lints]
